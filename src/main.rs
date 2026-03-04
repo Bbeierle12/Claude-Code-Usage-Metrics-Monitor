@@ -50,22 +50,36 @@ fn main() -> eframe::Result<()> {
     };
     let db = Arc::new(Mutex::new(db));
 
-    // Backfill: always persist all JSONL data to SQLite on startup.
-    // This is fast (upsert is idempotent) and ensures historical data is available.
-    // With --backfill flag, run backfill only and exit.
+    // Backfill: rebuild SQLite from JSONL files on startup.
+    // Uses rebuild_from_records() which clears existing data per-date before inserting,
+    // preventing double-counting on repeated restarts.
     {
         println!("Backfilling database from JSONL files...");
         let mut bf_tracker = watcher::FileTracker::new();
         let scan_results = watcher::initial_scan(&projects_dir, &mut bf_tracker);
-        let db_lock = db.lock().expect("db mutex poisoned");
+        let db_lock = db.lock().unwrap_or_else(|e| e.into_inner());
         let mut total_records = 0u64;
-        for (_path, records) in &scan_results {
-            if !records.is_empty() {
-                if let Err(e) = db_lock.persist(records) {
-                    eprintln!("  Error persisting records: {}", e);
-                }
-                total_records += records.len() as u64;
+        // Collect all records for a single rebuild call per date group
+        let all_records: Vec<&crate::types::MessageRecord> = scan_results
+            .iter()
+            .flat_map(|(_, records)| records.iter())
+            .collect();
+        if !all_records.is_empty() {
+            // Group by date to rebuild each date atomically
+            let mut by_date: std::collections::HashMap<String, Vec<&crate::types::MessageRecord>> =
+                std::collections::HashMap::new();
+            for rec in &all_records {
+                let date = rec.timestamp.format("%Y-%m-%d").to_string();
+                by_date.entry(date).or_default().push(rec);
             }
+            for recs in by_date.values() {
+                let owned: Vec<crate::types::MessageRecord> =
+                    recs.iter().map(|r| (*r).clone()).collect();
+                if let Err(e) = db_lock.rebuild_from_records(&owned) {
+                    eprintln!("  Error rebuilding records: {}", e);
+                }
+            }
+            total_records = all_records.len() as u64;
         }
         if let Ok(Some((min, max))) = db_lock.date_range() {
             println!(
@@ -88,7 +102,7 @@ fn main() -> eframe::Result<()> {
     let mut tracker = watcher::FileTracker::new();
     {
         let scan_results = watcher::initial_scan(&projects_dir, &mut tracker);
-        let mut s = state.lock().expect("metrics state mutex poisoned");
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         for (_path, records) in &scan_results {
             s.ingest(records, settings.idle_gap_minutes);
         }
@@ -108,13 +122,13 @@ fn main() -> eframe::Result<()> {
         .expect("Failed to start filesystem watcher");
 
     // Spawn a thread that drains the channel and updates shared state + DB
-    // No Settings param — pruning happens on the main thread in update()
     let state_writer = Arc::clone(&state);
     let db_writer = Arc::clone(&db);
+    let writer_idle_gap = settings.idle_gap_minutes;
     std::thread::spawn(move || {
         while let Ok(records) = rx.recv() {
-            let mut s = state_writer.lock().expect("metrics state mutex poisoned");
-            s.ingest(&records, 0); // idle gap detection on main thread only
+            let mut s = state_writer.lock().unwrap_or_else(|e| e.into_inner());
+            s.ingest(&records, writer_idle_gap);
 
             // Write-through to SQLite
             if let Ok(db_lock) = db_writer.lock() {
@@ -158,6 +172,7 @@ fn main() -> eframe::Result<()> {
                 tray_state,
                 settings,
                 settings_modal: None,
+                cached_state: MetricsState::default(),
             }))
         }),
     )
@@ -215,6 +230,8 @@ struct UsageApp {
     tray_state: Option<tray::TrayState>,
     settings: Settings,
     settings_modal: Option<ui::settings_modal::SettingsModal>,
+    /// Cached clone of MetricsState, only refreshed when dirty flag is set.
+    cached_state: MetricsState,
 }
 
 impl UsageApp {
@@ -274,20 +291,20 @@ impl eframe::App for UsageApp {
             }
         }
 
-        // Prune burn window on the main thread where we have Settings access
+        // Prune burn window and refresh cached state only when dirty
         {
             let mut s = self
                 .state
                 .lock()
-                .expect("metrics state mutex poisoned");
+                .unwrap_or_else(|e| e.into_inner());
             s.prune_burn_window(self.settings.burn_rate_window_minutes);
+            if s.dirty {
+                self.cached_state = s.clone();
+                s.dirty = false;
+            }
         }
 
-        let state = self
-            .state
-            .lock()
-            .expect("metrics state mutex poisoned")
-            .clone();
+        let state = &self.cached_state;
 
         // Check cost alert thresholds
         let cost = state.estimated_cost(&self.settings);
@@ -303,7 +320,7 @@ impl eframe::App for UsageApp {
 
         let gear_clicked = ui::render(
             ctx,
-            &state,
+            state,
             &self.settings,
             &mut self.date_range_selection,
             &self.historical_data,

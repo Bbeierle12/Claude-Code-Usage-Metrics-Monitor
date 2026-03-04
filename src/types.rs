@@ -216,7 +216,7 @@ impl ToolLatencyStats {
 
 /// Format a token count for display: 1234 -> "1.2K", 1234567 -> "1.2M".
 pub fn format_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
+    if n >= 999_950 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.1}K", n as f64 / 1_000.0)
@@ -245,6 +245,8 @@ pub struct MetricsState {
     pub pending_tool_uses: HashMap<String, PendingToolUse>,
     /// Per-tool-name latency and error statistics.
     pub tool_latencies: HashMap<String, ToolLatencyStats>,
+    /// Set to true when data changes; cleared by the UI after cloning.
+    pub dirty: bool,
 }
 
 #[cfg(test)]
@@ -261,7 +263,8 @@ mod tests {
     fn test_format_tokens_thousands() {
         assert_eq!(format_tokens(1_000), "1.0K");
         assert_eq!(format_tokens(1_500), "1.5K");
-        assert_eq!(format_tokens(999_999), "1000.0K");
+        assert_eq!(format_tokens(999_949), "999.9K");
+        assert_eq!(format_tokens(999_999), "1.0M");
     }
 
     #[test]

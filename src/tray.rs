@@ -62,10 +62,11 @@ pub fn spawn_tray() -> TrayState {
             .build()
             .expect("Failed to build tray icon");
 
-        // Poll loop: check menu events and title updates
+        // Event loop: block on menu events with timeout, check title updates
+        let menu_rx = MenuEvent::receiver();
         loop {
-            // Check menu events
-            if let Ok(event) = MenuEvent::receiver().try_recv() {
+            // Block with timeout to allow checking title updates
+            if let Ok(event) = menu_rx.recv_timeout(std::time::Duration::from_secs(2)) {
                 if event.id == show_id {
                     let current = vis.load(Ordering::Relaxed);
                     vis.store(!current, Ordering::Relaxed);
@@ -75,12 +76,14 @@ pub fn spawn_tray() -> TrayState {
                 }
             }
 
-            // Check title updates
-            if let Ok(new_title) = title_rx.try_recv() {
-                tray.set_title(Some(&new_title));
+            // Drain title updates (take the latest)
+            let mut latest_title = None;
+            while let Ok(new_title) = title_rx.try_recv() {
+                latest_title = Some(new_title);
             }
-
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(title) = latest_title {
+                tray.set_title(Some(&title));
+            }
         }
 
         drop(tray);

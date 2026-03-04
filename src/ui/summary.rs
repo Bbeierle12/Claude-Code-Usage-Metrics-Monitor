@@ -56,12 +56,14 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
 
     ui.separator();
 
-    // Model breakdown (compact inline)
+    // Model breakdown (compact inline, sorted for deterministic order)
     if !state.models.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.label("Models:");
-            let model_count = state.models.len();
-            for (i, (name, m)) in state.models.iter().enumerate() {
+            let mut models: Vec<_> = state.models.iter().collect();
+            models.sort_by_key(|(name, _)| (*name).clone());
+            let model_count = models.len();
+            for (i, (name, m)) in models.iter().enumerate() {
                 let cost = settings.estimate_cost(
                     name,
                     m.input_tokens,
@@ -69,12 +71,13 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
                     m.cache_creation_tokens,
                     m.cache_read_tokens,
                 );
-                let color = model_color(name);
+                let display_name = friendly_display_name(name);
+                let color = model_color(&display_name);
                 ui.colored_label(
                     color,
                     format!(
                         "{}: {} msgs, ${:.2}",
-                        capitalize(name),
+                        capitalize(&display_name),
                         m.message_count,
                         cost
                     ),
@@ -110,12 +113,24 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
     }
 }
 
+/// Extract a short display name from a full model identifier.
+/// "claude-opus-4-6" → "opus-4-6", "claude-sonnet-4-5" → "sonnet-4-5"
+fn friendly_display_name(model: &str) -> String {
+    model
+        .strip_prefix("claude-")
+        .unwrap_or(model)
+        .to_string()
+}
+
 fn model_color(name: &str) -> egui::Color32 {
-    match name {
-        "opus" => egui::Color32::from_rgb(180, 100, 255),  // purple
-        "sonnet" => egui::Color32::from_rgb(100, 180, 255), // blue
-        "haiku" => egui::Color32::from_rgb(100, 220, 180),  // teal
-        _ => egui::Color32::from_rgb(180, 180, 180),
+    if name.contains("opus") {
+        egui::Color32::from_rgb(180, 100, 255)  // purple
+    } else if name.contains("sonnet") {
+        egui::Color32::from_rgb(100, 180, 255) // blue
+    } else if name.contains("haiku") {
+        egui::Color32::from_rgb(100, 220, 180)  // teal
+    } else {
+        egui::Color32::from_rgb(180, 180, 180)
     }
 }
 

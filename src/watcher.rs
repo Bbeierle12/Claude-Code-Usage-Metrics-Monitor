@@ -68,7 +68,7 @@ impl FileTracker {
     }
 
     /// Record the current file length as the offset (marks file as "already read").
-    /// Used after initial_scan so the watcher doesn't re-read existing content.
+    #[cfg(test)]
     pub fn mark_fully_read(&mut self, path: &Path) {
         if let Ok(meta) = std::fs::metadata(path) {
             self.offsets.insert(path.to_path_buf(), meta.len());
@@ -103,13 +103,9 @@ fn scan_dir_recursive(
         if path.is_dir() {
             scan_dir_recursive(&path, tracker, results);
         } else if path.extension().is_some_and(|e| e == "jsonl") {
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let records = parser::parse_buffer(&content);
-            // Record offset so watcher won't re-read this content
-            tracker.mark_fully_read(&path);
+            // Use read_new_lines for streaming line-by-line parsing
+            // (avoids loading entire file into memory for large JSONL files)
+            let records = tracker.read_new_lines(&path);
             if !records.is_empty() {
                 results.push((path, records));
             }

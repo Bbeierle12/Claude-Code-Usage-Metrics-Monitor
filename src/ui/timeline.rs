@@ -1,6 +1,9 @@
 use eframe::egui;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 
-use crate::types::format_tokens;
+use crate::parser;
+use crate::types::{format_tokens, MessageType};
 
 /// A single event on the timeline.
 #[derive(Debug, Clone)]
@@ -36,7 +39,9 @@ impl EventType {
     }
 }
 
-/// Parse a JSONL file and extract timeline events for a specific session.
+/// Parse JSONL files and extract timeline events for a specific session.
+/// Uses streaming line-by-line reads to avoid loading entire files into memory.
+/// Reuses parser::parse_line() to avoid duplicating parsing logic.
 pub fn load_session_timeline(
     projects_dir: &std::path::Path,
     session_id: &str,
@@ -62,70 +67,43 @@ fn scan_for_session(
         if path.is_dir() {
             scan_for_session(&path, session_id, events);
         } else if path.extension().is_some_and(|e| e == "jsonl") {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                for line in content.lines() {
-                    if let Some(evt) = parse_timeline_event(line, session_id) {
-                        events.push(evt);
+            // Stream line-by-line instead of loading entire file
+            let file = match File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                // Quick pre-filter: skip lines that don't contain this session ID
+                if !line.contains(session_id) {
+                    continue;
+                }
+                // Reuse the canonical parser
+                if let Some(rec) = parser::parse_line(&line) {
+                    if rec.session_id == session_id {
+                        let (event_type, tokens, tool_name) = match rec.message_type {
+                            MessageType::UserPrompt => (EventType::User, 0, None),
+                            MessageType::Assistant => {
+                                let tool = rec.tool_names.first().cloned();
+                                (EventType::Assistant, rec.output_tokens, tool)
+                            }
+                            MessageType::ToolResult => (EventType::Tool, 0, None),
+                        };
+                        events.push(TimelineEvent {
+                            timestamp: rec.timestamp,
+                            event_type,
+                            tokens,
+                            tool_name,
+                        });
                     }
                 }
             }
         }
     }
-}
-
-/// Parse a single JSONL line into a TimelineEvent if it belongs to the given session.
-fn parse_timeline_event(line: &str, session_id: &str) -> Option<TimelineEvent> {
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-
-    // Check session
-    if v.get("sessionId")?.as_str()? != session_id {
-        return None;
-    }
-
-    let timestamp_str = v.get("timestamp")?.as_str()?;
-    let timestamp = timestamp_str.parse().ok()?;
-
-    let msg_type = v.get("type")?.as_str()?;
-
-    let message = v.get("message")?;
-
-    let (event_type, tokens, tool_name) = match msg_type {
-        "user" => (EventType::User, 0, None),
-        "assistant" => {
-            let usage_tokens = message
-                .get("usage")
-                .and_then(|u| u.get("output_tokens"))
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
-            // Check for tool_use in content
-            let tool = message
-                .get("content")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .find(|item| {
-                            item.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                        })
-                        .and_then(|item| item.get("name").and_then(|n| n.as_str()))
-                        .map(String::from)
-                });
-            (EventType::Assistant, usage_tokens, tool)
-        }
-        "tool_result" | "tool" => (EventType::Tool, 0, None),
-        _ => return None,
-    };
-
-    Some(TimelineEvent {
-        timestamp,
-        event_type,
-        tokens,
-        tool_name,
-    })
 }
 
 /// Render a session timeline detail panel.

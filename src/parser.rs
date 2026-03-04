@@ -282,19 +282,28 @@ pub fn parse_buffer(buf: &str) -> Vec<MessageRecord> {
     buf.lines().filter_map(parse_line).collect()
 }
 
+/// Cached home directory path to avoid repeated OS calls.
+fn cached_home_dir() -> &'static str {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<String> = OnceLock::new();
+    HOME.get_or_init(|| {
+        dirs::home_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default()
+    })
+}
+
 /// Extract a short project name from a cwd path.
 /// "/home/bbeierle12/Agent-Shell" -> "Agent-Shell"
 /// "/home/bbeierle12" -> "~"
 pub fn short_project_name(cwd: &str) -> String {
-    let home = dirs::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let home = cached_home_dir();
 
     if cwd == home {
         return "~".to_string();
     }
 
-    cwd.strip_prefix(&home)
+    cwd.strip_prefix(home)
         .and_then(|rest| rest.strip_prefix('/'))
         .unwrap_or(cwd)
         .to_string()

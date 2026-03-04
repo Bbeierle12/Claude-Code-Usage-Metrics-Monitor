@@ -5,9 +5,9 @@ use rusqlite::{params, Connection};
 
 use crate::config;
 use crate::parser;
-use crate::types::{MessageRecord, MetricsState, ProjectMetrics, SessionMetrics};
+use crate::types::{MessageRecord, MessageType, MetricsState, ProjectMetrics, SessionMetrics};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// A row from the daily_metrics table.
 #[derive(Debug, Clone)]
@@ -50,6 +50,8 @@ impl Storage {
     /// Open (or create) the database at a given path.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
+        // WAL mode improves concurrent read/write performance
+        conn.pragma_update(None, "journal_mode", "WAL")?;
         let mut storage = Self { conn };
         storage.migrate()?;
         Ok(storage)
@@ -103,6 +105,22 @@ impl Storage {
 
                 CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_metrics(date);
                 CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(date);",
+            )?;
+        }
+
+        if version < 2 {
+            self.conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN user_message_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN tool_result_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN tool_error_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN assistant_text_length INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN user_text_length INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN assistant_message_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN idle_gap_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN total_idle_secs INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN assistant_word_count INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE sessions ADD COLUMN user_word_count INTEGER NOT NULL DEFAULT 0;",
             )?;
         }
 
@@ -166,8 +184,13 @@ impl Storage {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO sessions (session_id, date, project, model, branch,
                  first_seen, last_seen, input_tokens, output_tokens,
-                 cache_creation_tokens, cache_read_tokens, message_count, tool_counts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 cache_creation_tokens, cache_read_tokens, message_count, tool_counts,
+                 user_message_count, tool_result_count, tool_error_count,
+                 assistant_text_length, user_text_length, assistant_message_count,
+                 turn_count, idle_gap_count, total_idle_secs,
+                 assistant_word_count, user_word_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                  ON CONFLICT(session_id) DO UPDATE SET
                    model = CASE WHEN excluded.model != 'unknown' AND excluded.model != ''
                                 THEN excluded.model ELSE sessions.model END,
@@ -177,7 +200,18 @@ impl Storage {
                    output_tokens = sessions.output_tokens + excluded.output_tokens,
                    cache_creation_tokens = sessions.cache_creation_tokens + excluded.cache_creation_tokens,
                    cache_read_tokens = sessions.cache_read_tokens + excluded.cache_read_tokens,
-                   message_count = sessions.message_count + excluded.message_count",
+                   message_count = sessions.message_count + excluded.message_count,
+                   user_message_count = sessions.user_message_count + excluded.user_message_count,
+                   tool_result_count = sessions.tool_result_count + excluded.tool_result_count,
+                   tool_error_count = sessions.tool_error_count + excluded.tool_error_count,
+                   assistant_text_length = sessions.assistant_text_length + excluded.assistant_text_length,
+                   user_text_length = sessions.user_text_length + excluded.user_text_length,
+                   assistant_message_count = sessions.assistant_message_count + excluded.assistant_message_count,
+                   turn_count = sessions.turn_count + excluded.turn_count,
+                   idle_gap_count = sessions.idle_gap_count + excluded.idle_gap_count,
+                   total_idle_secs = sessions.total_idle_secs + excluded.total_idle_secs,
+                   assistant_word_count = sessions.assistant_word_count + excluded.assistant_word_count,
+                   user_word_count = sessions.user_word_count + excluded.user_word_count",
             )?;
 
             for rec in records {
@@ -197,6 +231,11 @@ impl Storage {
                     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
                 };
 
+                let is_user = rec.message_type == MessageType::UserPrompt;
+                let is_tool = rec.message_type == MessageType::ToolResult;
+                let is_assistant = rec.message_type == MessageType::Assistant;
+                let is_error = rec.is_tool_error == Some(true);
+
                 stmt.execute(params![
                     &rec.session_id,
                     date,
@@ -211,6 +250,17 @@ impl Storage {
                     rec.cache_read_tokens,
                     1u64,
                     tool_json,
+                    if is_user { 1u64 } else { 0 },
+                    if is_tool { 1u64 } else { 0 },
+                    if is_tool && is_error { 1u64 } else { 0 },
+                    if is_assistant { rec.text_length } else { 0 },
+                    if is_user { rec.text_length } else { 0 },
+                    if is_assistant { 1u64 } else { 0 },
+                    if is_user { 1u64 } else { 0 }, // turn_count
+                    0u64, // idle_gap_count (computed at ingest time, not per-record)
+                    0i64, // total_idle_secs
+                    if is_assistant { rec.text_word_count } else { 0 },
+                    if is_user { rec.text_word_count } else { 0 },
                 ])?;
             }
         }
@@ -219,6 +269,35 @@ impl Storage {
 
     /// Persist records: upsert both daily_metrics and sessions.
     pub fn persist(&self, records: &[MessageRecord]) -> rusqlite::Result<()> {
+        self.upsert_daily(records)?;
+        self.upsert_sessions(records)?;
+        Ok(())
+    }
+
+    /// Clear all data for the given dates, then insert fresh records.
+    /// This avoids double-counting when the same JSONL data is re-read on restart.
+    pub fn rebuild_from_records(&self, records: &[MessageRecord]) -> rusqlite::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        // Collect unique dates being rebuilt
+        let dates: std::collections::HashSet<String> = records
+            .iter()
+            .map(|r| r.timestamp.format("%Y-%m-%d").to_string())
+            .collect();
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Clear existing data for these dates
+        for date in &dates {
+            tx.execute("DELETE FROM daily_metrics WHERE date = ?1", params![date])?;
+            tx.execute("DELETE FROM sessions WHERE date = ?1", params![date])?;
+        }
+
+        tx.commit()?;
+
+        // Now insert fresh (additive upsert is safe since we cleared first)
         self.upsert_daily(records)?;
         self.upsert_sessions(records)?;
         Ok(())
@@ -282,7 +361,11 @@ impl Storage {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, project, model, branch, first_seen, last_seen,
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-                    message_count
+                    message_count,
+                    user_message_count, tool_result_count, tool_error_count,
+                    assistant_text_length, user_text_length, assistant_message_count,
+                    turn_count, idle_gap_count, total_idle_secs,
+                    assistant_word_count, user_word_count
              FROM sessions WHERE date = ?1",
         )?;
         let mut rows = stmt.query(params![date])?;
@@ -333,17 +416,17 @@ impl Storage {
                     cache_read_tokens: cache_read,
                     message_count: msg_count,
                     branch,
-                    user_message_count: 0,
-                    tool_result_count: 0,
-                    tool_error_count: 0,
-                    assistant_text_length: 0,
-                    user_text_length: 0,
-                    assistant_message_count: 0,
-                    turn_count: 0,
-                    idle_gap_count: 0,
-                    total_idle_secs: 0,
-                    assistant_word_count: 0,
-                    user_word_count: 0,
+                    user_message_count: row.get(11)?,
+                    tool_result_count: row.get(12)?,
+                    tool_error_count: row.get(13)?,
+                    assistant_text_length: row.get(14)?,
+                    user_text_length: row.get(15)?,
+                    assistant_message_count: row.get(16)?,
+                    turn_count: row.get(17)?,
+                    idle_gap_count: row.get(18)?,
+                    total_idle_secs: row.get(19)?,
+                    assistant_word_count: row.get(20)?,
+                    user_word_count: row.get(21)?,
                 },
             );
         }
@@ -681,6 +764,37 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].input_tokens, 150);
         assert_eq!(rows[0].output_tokens, 260);
+    }
+
+    #[test]
+    fn test_rebuild_idempotent_no_double_counting() {
+        let storage = Storage::open_memory().unwrap();
+        let records = vec![
+            make_record_on_date("s1", "sonnet", 100, 200, "2026-03-01"),
+            make_record_on_date("s2", "opus", 300, 400, "2026-03-01"),
+        ];
+
+        // First rebuild
+        storage.rebuild_from_records(&records).unwrap();
+        let rows = storage
+            .query_daily_range("2026-03-01", "2026-03-01")
+            .unwrap();
+        let total_input: u64 = rows.iter().map(|r| r.input_tokens).sum();
+        assert_eq!(total_input, 400); // 100 + 300
+
+        // Second rebuild (simulates restart) — should NOT double
+        storage.rebuild_from_records(&records).unwrap();
+        let rows = storage
+            .query_daily_range("2026-03-01", "2026-03-01")
+            .unwrap();
+        let total_input: u64 = rows.iter().map(|r| r.input_tokens).sum();
+        assert_eq!(total_input, 400); // still 400, not 800
+
+        // Session counts should also not double
+        let state = storage.load_date("2026-03-01").unwrap().unwrap();
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(state.sessions["s1"].input_tokens, 100);
+        assert_eq!(state.sessions["s2"].input_tokens, 300);
     }
 
     #[test]

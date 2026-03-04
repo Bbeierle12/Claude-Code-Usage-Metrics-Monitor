@@ -24,6 +24,7 @@ impl MetricsState {
                 continue;
             }
 
+            self.dirty = true;
             self.total_messages += 1;
 
             // Update last_updated
@@ -162,10 +163,9 @@ impl MetricsState {
                     project.cache_creation_tokens += rec.cache_creation_tokens;
                     project.cache_read_tokens += rec.cache_read_tokens;
 
-                    // Per-model
-                    let model_key = friendly_model_name(&rec.model);
+                    // Per-model (preserve full model identifier)
                     let model_metrics =
-                        self.models.entry(model_key.to_string()).or_default();
+                        self.models.entry(rec.model.clone()).or_default();
                     model_metrics.input_tokens += rec.input_tokens;
                     model_metrics.output_tokens += rec.output_tokens;
                     model_metrics.cache_creation_tokens += rec.cache_creation_tokens;
@@ -210,24 +210,6 @@ impl MetricsState {
             .is_some_and(|(ts, _)| *ts < cutoff)
         {
             self.burn_window.pop_front();
-        }
-    }
-
-    /// Ingest records without the today-only filter (for backfill).
-    #[allow(dead_code)]
-    pub fn ingest_all(&mut self, records: &[MessageRecord]) {
-        for rec in records {
-            self.total_messages += 1;
-            self.total_input += rec.input_tokens;
-            self.total_output += rec.output_tokens;
-            self.total_cache_creation += rec.cache_creation_tokens;
-            self.total_cache_read += rec.cache_read_tokens;
-
-            match self.last_updated {
-                Some(prev) if rec.timestamp > prev => self.last_updated = Some(rec.timestamp),
-                None => self.last_updated = Some(rec.timestamp),
-                _ => {}
-            }
         }
     }
 
@@ -323,17 +305,6 @@ impl MetricsState {
     }
 }
 
-fn friendly_model_name(model: &str) -> &str {
-    if model.contains("opus") {
-        "opus"
-    } else if model.contains("sonnet") {
-        "sonnet"
-    } else if model.contains("haiku") {
-        "haiku"
-    } else {
-        model
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -403,8 +374,8 @@ mod tests {
         state.ingest(&records, 0);
 
         assert_eq!(state.models.len(), 2);
-        assert!(state.models.contains_key("sonnet"));
-        assert!(state.models.contains_key("opus"));
+        assert!(state.models.contains_key("claude-sonnet-4-5"));
+        assert!(state.models.contains_key("claude-opus-4-5"));
     }
 
     #[test]
@@ -418,11 +389,18 @@ mod tests {
     }
 
     #[test]
-    fn test_friendly_model_name() {
-        assert_eq!(friendly_model_name("claude-opus-4-5"), "opus");
-        assert_eq!(friendly_model_name("claude-sonnet-4-5"), "sonnet");
-        assert_eq!(friendly_model_name("claude-haiku-4-5"), "haiku");
-        assert_eq!(friendly_model_name("some-unknown-model"), "some-unknown-model");
+    fn test_model_keys_preserve_full_name() {
+        let mut state = MetricsState::default();
+        let records = vec![
+            make_record("s1", "claude-opus-4-5", 100, 200),
+            make_record("s2", "claude-opus-4-6", 300, 400),
+        ];
+        state.ingest(&records, 0);
+
+        // Different model versions should be separate entries
+        assert_eq!(state.models.len(), 2);
+        assert!(state.models.contains_key("claude-opus-4-5"));
+        assert!(state.models.contains_key("claude-opus-4-6"));
     }
 
     #[test]

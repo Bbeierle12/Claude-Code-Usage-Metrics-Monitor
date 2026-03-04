@@ -163,11 +163,11 @@ mod tests {
     use std::fs;
     use std::io::Write;
 
-    /// Produce a valid JSONL assistant line with usage data.
+    /// Produce a valid JSONL assistant line with usage data (final, with stop_reason).
     fn make_jsonl_line(session_id: &str, model: &str, input: u64, output: u64) -> String {
         let ts = Utc::now().to_rfc3339();
         format!(
-            r#"{{"type":"assistant","sessionId":"{}","timestamp":"{}","cwd":"/tmp/proj","message":{{"model":"{}","role":"assistant","content":[],"usage":{{"input_tokens":{},"output_tokens":{},"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
+            r#"{{"type":"assistant","sessionId":"{}","timestamp":"{}","cwd":"/tmp/proj","message":{{"model":"{}","role":"assistant","stop_reason":"end_turn","content":[],"usage":{{"input_tokens":{},"output_tokens":{},"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
             session_id, ts, model, input, output
         )
     }
@@ -199,7 +199,7 @@ mod tests {
             format!(r#","gitBranch":"{}""#, branch)
         };
         format!(
-            r#"{{"type":"assistant","sessionId":"{}","timestamp":"{}","cwd":"/tmp/proj"{},"message":{{"model":"{}","role":"assistant","content":{},"usage":{{"input_tokens":{},"output_tokens":{},"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
+            r#"{{"type":"assistant","sessionId":"{}","timestamp":"{}","cwd":"/tmp/proj"{},"message":{{"model":"{}","role":"assistant","stop_reason":"end_turn","content":{},"usage":{{"input_tokens":{},"output_tokens":{},"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
             session_id, ts, branch_field, model, content, input, output
         )
     }

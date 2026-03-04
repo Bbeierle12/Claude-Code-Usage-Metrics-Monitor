@@ -49,6 +49,18 @@ fn parse_assistant(v: &Value) -> Option<MessageRecord> {
         .to_string();
 
     let message = v.get("message")?;
+
+    // Claude Code logs each streaming content block (thinking, text, tool_use) as a
+    // separate assistant JSONL line. All lines from the same API turn carry identical
+    // cumulative usage snapshots. Only the final line has stop_reason != null and
+    // contains the correct accumulated totals. Skip intermediate streaming lines to
+    // avoid counting usage 3-7x.
+    let stop_reason = message.get("stop_reason");
+    match stop_reason {
+        Some(sr) if !sr.is_null() => {} // final line — process it
+        _ => return None,               // streaming intermediate or missing — skip
+    }
+
     let model = message
         .get("model")
         .and_then(|m| m.as_str())
@@ -334,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_parse_line_assistant_with_usage() {
-        let line = r#"{"type":"assistant","sessionId":"abc-123","timestamp":"2026-03-03T10:30:00Z","cwd":"/home/user/proj","uuid":"u1","parentUuid":"p1","message":{"model":"claude-opus-4-6","role":"assistant","content":[],"usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":50,"cache_read_input_tokens":1000}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc-123","timestamp":"2026-03-03T10:30:00Z","cwd":"/home/user/proj","uuid":"u1","parentUuid":"p1","message":{"model":"claude-opus-4-6","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":50,"cache_read_input_tokens":1000}}}"#;
         let rec = parse_line(line).unwrap();
         assert_eq!(rec.message_type, MessageType::Assistant);
         assert_eq!(rec.session_id, "abc-123");
@@ -370,19 +382,19 @@ mod tests {
 
     #[test]
     fn test_parse_line_missing_session_id() {
-        let line = r#"{"type":"assistant","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         assert!(parse_line(line).is_none());
     }
 
     #[test]
     fn test_parse_line_missing_timestamp() {
-        let line = r#"{"type":"assistant","sessionId":"abc","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         assert!(parse_line(line).is_none());
     }
 
     #[test]
     fn test_parse_line_zero_tokens() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
         let rec = parse_line(line).unwrap();
         assert_eq!(rec.input_tokens, 0);
         assert_eq!(rec.output_tokens, 0);
@@ -392,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_parse_line_extracts_tool_names() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"t1","input":{}},{"type":"text","text":"hello"},{"type":"tool_use","name":"Read","id":"t2","input":{}}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[{"type":"tool_use","name":"Bash","id":"t1","input":{}},{"type":"text","text":"hello"},{"type":"tool_use","name":"Read","id":"t2","input":{}}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         let rec = parse_line(line).unwrap();
         assert_eq!(rec.tool_names, vec!["Bash", "Read"]);
         assert_eq!(rec.tool_use_ids, vec!["t1", "t2"]);
@@ -400,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_parse_line_no_tool_use_empty_vec() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         let rec = parse_line(line).unwrap();
         assert!(rec.tool_names.is_empty());
         assert!(rec.tool_use_ids.is_empty());
@@ -408,37 +420,68 @@ mod tests {
 
     #[test]
     fn test_parse_line_empty_content_array() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         let rec = parse_line(line).unwrap();
         assert!(rec.tool_names.is_empty());
     }
 
     #[test]
     fn test_parse_line_extracts_git_branch() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","gitBranch":"feature/auth","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","gitBranch":"feature/auth","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         let rec = parse_line(line).unwrap();
         assert_eq!(rec.git_branch, "feature/auth");
     }
 
     #[test]
     fn test_parse_line_missing_git_branch_defaults_empty() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         let rec = parse_line(line).unwrap();
         assert_eq!(rec.git_branch, "");
+    }
+
+    #[test]
+    fn test_parse_line_skips_streaming_intermediate() {
+        // Assistant line without stop_reason (streaming intermediate) — should be skipped
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[{"type":"text","text":"partial"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        assert!(parse_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_line_skips_null_stop_reason() {
+        // Assistant line with stop_reason: null (streaming intermediate) — should be skipped
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":null,"content":[{"type":"text","text":"partial"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        assert!(parse_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_line_accepts_tool_use_stop_reason() {
+        // stop_reason: "tool_use" is a valid final line
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","id":"t1","input":{}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let rec = parse_line(line).unwrap();
+        assert_eq!(rec.message_type, MessageType::Assistant);
+        assert_eq!(rec.tool_names, vec!["Bash"]);
+    }
+
+    #[test]
+    fn test_parse_line_accepts_max_tokens_stop_reason() {
+        // stop_reason: "max_tokens" is a valid final line
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"max_tokens","content":[],"usage":{"input_tokens":100,"output_tokens":32000}}}"#;
+        let rec = parse_line(line).unwrap();
+        assert_eq!(rec.output_tokens, 32000);
     }
 
     // ── Assistant text length ──
 
     #[test]
     fn test_parse_assistant_text_length() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[{"type":"text","text":"Hello world!"}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Hello world!"}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         let rec = parse_line(line).unwrap();
         assert_eq!(rec.text_length, 12); // "Hello world!" = 12 chars
     }
 
     #[test]
     fn test_parse_assistant_multiple_text_blocks() {
-        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[{"type":"text","text":"Hello"},{"type":"text","text":" world"}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Hello"},{"type":"text","text":" world"}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
         let rec = parse_line(line).unwrap();
         assert_eq!(rec.text_length, 11); // "Hello" + " world" = 5 + 6
     }
@@ -540,7 +583,7 @@ mod tests {
             r#"{"type":"progress","data":{}}"#, // ignored type
             "{bad json}",                     // invalid
             r#"{"type":"user","sessionId":"a","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","uuid":"u1","parentUuid":"p1","message":{"role":"user","content":"hello"}}"#, // user prompt
-            r#"{"type":"assistant","sessionId":"a","timestamp":"2026-03-03T10:01:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#, // assistant
+            r#"{"type":"assistant","sessionId":"a","timestamp":"2026-03-03T10:01:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#, // assistant
             "   ",                            // whitespace
             r#"{"type":"user","sessionId":"a","timestamp":"2026-03-03T10:02:00Z","cwd":"/tmp","uuid":"u2","parentUuid":"p2","toolUseResult":{"stdout":"ok"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"done"}]}}"#, // tool result
         ].join("\n");
@@ -556,8 +599,8 @@ mod tests {
     fn test_parse_buffer_only_assistant_unchanged() {
         // Existing behavior: buffer with only assistant lines still works
         let buf = [
-            r#"{"type":"assistant","sessionId":"a","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#,
-            r#"{"type":"assistant","sessionId":"b","timestamp":"2026-03-03T11:00:00Z","cwd":"/tmp","message":{"model":"opus","role":"assistant","content":[],"usage":{"input_tokens":30,"output_tokens":40}}}"#,
+            r#"{"type":"assistant","sessionId":"a","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#,
+            r#"{"type":"assistant","sessionId":"b","timestamp":"2026-03-03T11:00:00Z","cwd":"/tmp","message":{"model":"opus","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":30,"output_tokens":40}}}"#,
         ].join("\n");
 
         let recs = parse_buffer(&buf);

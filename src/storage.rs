@@ -7,7 +7,7 @@ use crate::config;
 use crate::parser;
 use crate::types::{MessageRecord, MessageType, MetricsState, ProjectMetrics, SessionMetrics};
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// A row from the daily_metrics table.
 #[derive(Debug, Clone)]
@@ -169,6 +169,18 @@ impl Storage {
                      error_count INTEGER DEFAULT 0,
                      PRIMARY KEY (date, category)
                  );",
+            )?;
+        }
+
+        if version < 4 {
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS inferred_metric_versions (
+                    date       TEXT NOT NULL,
+                    metric_id  TEXT NOT NULL,
+                    version    INTEGER NOT NULL,
+                    description TEXT,
+                    PRIMARY KEY (date, metric_id)
+                );",
             )?;
         }
 
@@ -715,6 +727,42 @@ impl Storage {
     }
 }
 
+impl Storage {
+    /// Persist current inferred metric versions for the given date.
+    pub fn persist_metric_versions(&self, date: &str) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO inferred_metric_versions (date, metric_id, version, description)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(date, metric_id) DO UPDATE SET
+                   version = excluded.version,
+                   description = excluded.description",
+            )?;
+            for def in crate::metric_registry::inferred_metrics() {
+                stmt.execute(params![date, def.id, def.version, def.description])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Query inferred metric versions recorded for a given date.
+    #[allow(dead_code)]
+    pub fn metric_versions_for_date(
+        &self,
+        date: &str,
+    ) -> rusqlite::Result<Vec<(String, u32, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT metric_id, version, COALESCE(description, '')
+             FROM inferred_metric_versions WHERE date = ?1",
+        )?;
+        let rows = stmt.query_map(params![date], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect()
+    }
+}
+
 /// Default database path.
 pub fn db_path() -> PathBuf {
     dirs::home_dir()
@@ -999,5 +1047,44 @@ mod tests {
 
         let state = storage.load_date("2026-03-01").unwrap().unwrap();
         assert_eq!(state.sessions["s1"].branch, "feature/new");
+    }
+
+    #[test]
+    fn test_persist_and_query_metric_versions() {
+        let storage = Storage::open_memory().unwrap();
+
+        // Persist inferred metric versions for a date
+        storage.persist_metric_versions("2026-03-10").unwrap();
+
+        let versions = storage.metric_versions_for_date("2026-03-10").unwrap();
+        assert!(!versions.is_empty());
+
+        // All inferred metrics should be present
+        let inferred_count = crate::metric_registry::inferred_metrics().count();
+        assert_eq!(versions.len(), inferred_count);
+
+        // Check a specific one
+        let confidence = versions.iter().find(|(id, _, _)| id == "confidence_score");
+        assert!(confidence.is_some());
+        let (_, ver, desc) = confidence.unwrap();
+        assert_eq!(*ver, 1);
+        assert!(!desc.is_empty());
+    }
+
+    #[test]
+    fn test_metric_versions_idempotent() {
+        let storage = Storage::open_memory().unwrap();
+        storage.persist_metric_versions("2026-03-10").unwrap();
+        storage.persist_metric_versions("2026-03-10").unwrap(); // should not error
+        let versions = storage.metric_versions_for_date("2026-03-10").unwrap();
+        let inferred_count = crate::metric_registry::inferred_metrics().count();
+        assert_eq!(versions.len(), inferred_count);
+    }
+
+    #[test]
+    fn test_metric_versions_empty_date() {
+        let storage = Storage::open_memory().unwrap();
+        let versions = storage.metric_versions_for_date("2026-01-01").unwrap();
+        assert!(versions.is_empty());
     }
 }

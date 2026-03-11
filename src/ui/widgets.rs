@@ -1,5 +1,7 @@
 use eframe::egui::{self, Color32, Ui};
 
+use crate::metric_registry::{MetricClass, MetricDef};
+
 /// Render a horizontal gauge bar with label and value.
 pub fn render_gauge(ui: &mut Ui, label: &str, value: f64, color: Color32, width: f32) {
     ui.horizontal(|ui| {
@@ -32,6 +34,28 @@ pub fn render_metric_row(ui: &mut Ui, label: &str, value_str: &str, color: Color
             ui.colored_label(color, value_str);
         });
     });
+}
+
+/// Render a classification indicator after a metric.
+/// - Measured: nothing (clean default)
+/// - Derived: dim `[d]` with tooltip showing description
+/// - Inferred: dim `[~vN]` with tooltip showing formula + version
+pub fn metric_class_indicator(ui: &mut Ui, def: &MetricDef) {
+    match def.class {
+        MetricClass::Measured => {} // no indicator
+        MetricClass::Derived => {
+            ui.colored_label(Color32::from_rgb(100, 100, 100), "[d]")
+                .on_hover_text(format!("{} (Derived)\n{}", def.display_name, def.description));
+        }
+        MetricClass::Inferred => {
+            let text = format!("[~v{}]", def.version);
+            ui.colored_label(Color32::from_rgb(100, 100, 100), &text)
+                .on_hover_text(format!(
+                    "{} (Inferred v{})\n{}",
+                    def.display_name, def.version, def.description
+                ));
+        }
+    }
 }
 
 /// Render a multi-segment stacked horizontal bar.

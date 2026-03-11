@@ -2,8 +2,10 @@ use chrono::Utc;
 use eframe::egui;
 
 use crate::alerts;
+use crate::metric_registry;
 use crate::settings::Settings;
 use crate::types::{format_tokens, MetricsState};
+use super::widgets;
 
 pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
     let now = Utc::now();
@@ -186,6 +188,9 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
                 format!("{:.0} tok/min", burn_rate)
             };
             ui.colored_label(color, label);
+            if let Some(def) = metric_registry::lookup("burn_rate") {
+                widgets::metric_class_indicator(ui, def);
+            }
         });
         ui.separator();
     }

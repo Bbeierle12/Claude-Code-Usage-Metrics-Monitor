@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32};
 
+use crate::metric_registry;
 use crate::types::MetricsState;
 use super::widgets;
 
@@ -66,7 +67,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
 
     // Tool co-occurrence
     if !cooccurrence.is_empty() {
-        ui.label("Tool pairs (co-occurrence):");
+        ui.horizontal(|ui| {
+            ui.label("Tool pairs (co-occurrence):");
+            if let Some(def) = metric_registry::lookup("tool_cooccurrence") {
+                widgets::metric_class_indicator(ui, def);
+            }
+        });
         ui.add_space(2.0);
 
         let mut sorted_pairs: Vec<_> = cooccurrence.iter().collect();

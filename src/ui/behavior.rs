@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32};
 
+use crate::metric_registry;
 use crate::types::MetricsState;
 use super::widgets;
 
@@ -48,7 +49,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     } else {
         Color32::from_rgb(200, 100, 100)
     };
-    widgets::render_gauge(ui, "Search-before-act", search_act_ratio, ratio_color, 120.0);
+    ui.horizontal(|ui| {
+        widgets::render_gauge(ui, "Search-before-act", search_act_ratio, ratio_color, 120.0);
+        if let Some(def) = metric_registry::lookup("search_before_act") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 
     ui.add_space(4.0);
 
@@ -64,7 +70,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     } else {
         Color32::from_rgb(200, 200, 100)
     };
-    widgets::render_gauge(ui, "Edit precision", precision_display, precision_color, 120.0);
+    ui.horizontal(|ui| {
+        widgets::render_gauge(ui, "Edit precision", precision_display, precision_color, 120.0);
+        if let Some(def) = metric_registry::lookup("edit_precision") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
     widgets::render_metric_row(
         ui,
         "  Edit ratio (new/old)",
@@ -83,7 +94,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     } else {
         Color32::from_rgb(200, 100, 100)
     };
-    widgets::render_gauge(ui, "Confidence score", confidence, conf_color, 120.0);
+    ui.horizontal(|ui| {
+        widgets::render_gauge(ui, "Confidence score", confidence, conf_color, 120.0);
+        if let Some(def) = metric_registry::lookup("confidence_score") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 
     ui.add_space(4.0);
 
@@ -93,12 +109,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     } else {
         Color32::from_rgb(180, 180, 180)
     };
-    widgets::render_metric_row(
-        ui,
-        "Retries",
-        &total_retries.to_string(),
-        retry_color,
-    );
+    ui.horizontal(|ui| {
+        widgets::render_metric_row(ui, "Retries", &total_retries.to_string(), retry_color);
+        if let Some(def) = metric_registry::lookup("retry_detection") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 
     // TDD detection
     let tdd_color = if total_tdd_cycles > 0 {
@@ -106,20 +122,20 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     } else {
         Color32::from_rgb(120, 120, 120)
     };
-    widgets::render_metric_row(
-        ui,
-        "TDD cycles (T-E-T)",
-        &total_tdd_cycles.to_string(),
-        tdd_color,
-    );
+    ui.horizontal(|ui| {
+        widgets::render_metric_row(ui, "TDD cycles (T-E-T)", &total_tdd_cycles.to_string(), tdd_color);
+        if let Some(def) = metric_registry::lookup("tdd_cycle") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 
     // Exploration breadth
-    widgets::render_metric_row(
-        ui,
-        "Exploration breadth",
-        &format!("{} files", total_breadth),
-        Color32::from_rgb(180, 180, 180),
-    );
+    ui.horizontal(|ui| {
+        widgets::render_metric_row(ui, "Exploration breadth", &format!("{} files", total_breadth), Color32::from_rgb(180, 180, 180));
+        if let Some(def) = metric_registry::lookup("exploration_breadth") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 
     // Per-session breakdown
     if state.session_behaviors.len() > 1 {

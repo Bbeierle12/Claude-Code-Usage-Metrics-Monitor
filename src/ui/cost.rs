@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32};
 
+use crate::metric_registry;
 use crate::settings::Settings;
 use crate::types::MetricsState;
 use super::widgets;
@@ -22,7 +23,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
     } else {
         Color32::from_rgb(200, 100, 100)
     };
-    widgets::render_gauge(ui, "Cache efficiency", cache_eff, cache_color, 120.0);
+    ui.horizontal(|ui| {
+        widgets::render_gauge(ui, "Cache efficiency", cache_eff, cache_color, 120.0);
+        if let Some(def) = metric_registry::lookup("cache_efficiency") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 
     // Cache efficiency trend sparkline
     if state.cost_intel.cache_efficiency_samples.len() > 5 {
@@ -94,12 +100,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
     } else {
         Color32::from_rgb(180, 180, 180)
     };
-    widgets::render_metric_row(
-        ui,
-        "Token waste events",
-        &state.cost_intel.token_waste_events.to_string(),
-        waste_color,
-    );
+    ui.horizontal(|ui| {
+        widgets::render_metric_row(ui, "Token waste events", &state.cost_intel.token_waste_events.to_string(), waste_color);
+        if let Some(def) = metric_registry::lookup("token_waste") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
     if state.cost_intel.token_waste_tokens > 0 {
         widgets::render_metric_row(
             ui,
@@ -118,10 +124,10 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
         0.0
     };
     ui.add_space(4.0);
-    widgets::render_metric_row(
-        ui,
-        "Cost per 1K output",
-        &format!("${:.4}", cost_per_1k_output),
-        Color32::from_rgb(180, 180, 180),
-    );
+    ui.horizontal(|ui| {
+        widgets::render_metric_row(ui, "Cost per 1K output", &format!("${:.4}", cost_per_1k_output), Color32::from_rgb(180, 180, 180));
+        if let Some(def) = metric_registry::lookup("cost_per_1k_output") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 }

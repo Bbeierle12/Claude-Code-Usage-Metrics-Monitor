@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32};
 
+use crate::metric_registry;
 use crate::types::{MetricsState, SessionPhase};
 use super::widgets;
 
@@ -35,13 +36,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
 
     // Conversation tree depth
     let depth_ratio = (max_depth as f64 / 20.0).min(1.0);
-    widgets::render_gauge(
-        ui,
-        "Tree depth",
-        depth_ratio,
-        Color32::from_rgb(100, 180, 255),
-        120.0,
-    );
+    ui.horizontal(|ui| {
+        widgets::render_gauge(ui, "Tree depth", depth_ratio, Color32::from_rgb(100, 180, 255), 120.0);
+        if let Some(def) = metric_registry::lookup("tree_depth") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
     widgets::render_metric_row(
         ui,
         "  Max depth",
@@ -70,7 +70,12 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     ui.add_space(8.0);
 
     // Phase timeline
-    ui.label("Session phases:");
+    ui.horizontal(|ui| {
+        ui.label("Session phases:");
+        if let Some(def) = metric_registry::lookup("session_phase") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
     ui.add_space(2.0);
 
     for (sid, behavior) in &state.session_behaviors {
@@ -109,18 +114,13 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     );
 
     // Question vs directive
-    widgets::render_metric_row(
-        ui,
-        "Questions (long)",
-        &total_questions.to_string(),
-        Color32::from_rgb(180, 180, 180),
-    );
-    widgets::render_metric_row(
-        ui,
-        "Directives (short)",
-        &total_directives.to_string(),
-        Color32::from_rgb(180, 180, 180),
-    );
+    ui.horizontal(|ui| {
+        widgets::render_metric_row(ui, "Questions (long)", &total_questions.to_string(), Color32::from_rgb(180, 180, 180));
+        widgets::render_metric_row(ui, "Directives (short)", &total_directives.to_string(), Color32::from_rgb(180, 180, 180));
+        if let Some(def) = metric_registry::lookup("prompt_intent") {
+            widgets::metric_class_indicator(ui, def);
+        }
+    });
 
     // Response density
     let mut total_assistant_tokens: u64 = 0;

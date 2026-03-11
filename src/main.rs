@@ -1,6 +1,7 @@
 mod aggregator;
 mod alerts;
 mod config;
+mod metric_registry;
 mod parser;
 mod settings;
 mod storage;
@@ -342,11 +343,12 @@ impl eframe::App for UsageApp {
             }
         }
 
-        // Persist detail tables every 30 seconds
+        // Persist detail tables and metric versions every 30 seconds
         if self.last_detail_persist.elapsed() >= std::time::Duration::from_secs(30) {
             let today = storage::today_str();
             if let Ok(db_lock) = self.db.lock() {
                 let _ = db_lock.persist_details(&today, &self.cached_state);
+                let _ = db_lock.persist_metric_versions(&today);
             }
             self.last_detail_persist = std::time::Instant::now();
         }

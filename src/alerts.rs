@@ -47,29 +47,32 @@ impl AlertState {
 
         self.fired.insert(level);
 
-        let (title, urgency) = match level {
-            ThresholdLevel::Warn => (
-                format!("Claude Code usage warning: ${:.2} today", current_cost),
-                notify_rust::Urgency::Normal,
-            ),
-            ThresholdLevel::Critical => (
-                format!("Claude Code usage CRITICAL: ${:.2} today", current_cost),
-                notify_rust::Urgency::Critical,
-            ),
-        };
+        // Fire desktop notification (best effort, requires "tray" feature)
+        #[cfg(feature = "tray")]
+        {
+            let (title, urgency) = match level {
+                ThresholdLevel::Warn => (
+                    format!("Claude Code usage warning: ${:.2} today", current_cost),
+                    notify_rust::Urgency::Normal,
+                ),
+                ThresholdLevel::Critical => (
+                    format!("Claude Code usage CRITICAL: ${:.2} today", current_cost),
+                    notify_rust::Urgency::Critical,
+                ),
+            };
 
-        let threshold = match level {
-            ThresholdLevel::Warn => settings.daily_cost_warn,
-            ThresholdLevel::Critical => settings.daily_cost_critical,
-        };
+            let threshold = match level {
+                ThresholdLevel::Warn => settings.daily_cost_warn,
+                ThresholdLevel::Critical => settings.daily_cost_critical,
+            };
 
-        // Fire desktop notification (best effort)
-        let _ = notify_rust::Notification::new()
-            .summary(&title)
-            .body(&format!("Threshold: ${:.2}", threshold))
-            .urgency(urgency)
-            .timeout(notify_rust::Timeout::Milliseconds(8000))
-            .show();
+            let _ = notify_rust::Notification::new()
+                .summary(&title)
+                .body(&format!("Threshold: ${:.2}", threshold))
+                .urgency(urgency)
+                .timeout(notify_rust::Timeout::Milliseconds(8000))
+                .show();
+        }
 
         Some(level)
     }

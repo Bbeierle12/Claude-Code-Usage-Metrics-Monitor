@@ -83,7 +83,7 @@ fn scan_for_session(
                     continue;
                 }
                 // Reuse the canonical parser
-                if let Some(rec) = parser::parse_line(&line) {
+                if let Ok(rec) = parser::parse_line(&line) {
                     if rec.session_id == session_id {
                         let (event_type, tokens, tool_name) = match rec.message_type {
                             MessageType::UserPrompt => (EventType::User, 0, None),

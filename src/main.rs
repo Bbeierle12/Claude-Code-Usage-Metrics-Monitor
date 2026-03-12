@@ -1,10 +1,12 @@
 mod aggregator;
 mod alerts;
 mod config;
+mod heuristics;
 mod metric_registry;
 mod parser;
 mod settings;
 mod storage;
+#[cfg(feature = "tray")]
 mod tray;
 mod types;
 mod ui;
@@ -19,7 +21,8 @@ use types::MetricsState;
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let backfill = args.iter().any(|a| a == "--backfill");
+    let backfill = args.iter().any(|a| a == "--backfill-only" || a == "--backfill");
+    #[cfg(feature = "tray")]
     let tray_mode = args.iter().any(|a| a == "--tray");
 
     let settings = Settings::load();
@@ -133,7 +136,9 @@ fn main() -> eframe::Result<()> {
 
             // Write-through to SQLite
             if let Ok(db_lock) = db_writer.lock() {
-                let _ = db_lock.persist(&records);
+                if let Err(e) = db_lock.persist(&records) {
+                    eprintln!("DB persist error: {}", e);
+                }
             }
         }
     });
@@ -147,6 +152,7 @@ fn main() -> eframe::Result<()> {
     };
 
     // Optionally spawn system tray
+    #[cfg(feature = "tray")]
     let tray_state = if tray_mode {
         println!("Starting in system tray mode...");
         Some(tray::spawn_tray())
@@ -170,6 +176,7 @@ fn main() -> eframe::Result<()> {
                 historical_data: None,
                 alert_state: alerts::AlertState::new(),
                 session_detail: ui::sessions::SessionDetailState::new(projects_dir_for_ui),
+                #[cfg(feature = "tray")]
                 tray_state,
                 settings,
                 settings_modal: None,
@@ -205,8 +212,8 @@ impl DateRangeSelection {
         let end = storage::today_str();
         let start = match self {
             Self::Today => end.clone(),
-            Self::Last7 => storage::days_ago(7),
-            Self::Last30 => storage::days_ago(30),
+            Self::Last7 => storage::days_ago(6),
+            Self::Last30 => storage::days_ago(29),
             Self::AllTime => "2020-01-01".to_string(),
         };
         (start, end)
@@ -236,6 +243,7 @@ struct UsageApp {
     historical_data: Option<HistoricalData>,
     alert_state: alerts::AlertState,
     session_detail: ui::sessions::SessionDetailState,
+    #[cfg(feature = "tray")]
     tray_state: Option<tray::TrayState>,
     settings: Settings,
     settings_modal: Option<ui::settings_modal::SettingsModal>,
@@ -266,18 +274,28 @@ impl UsageApp {
             return;
         }
 
-        let (start, end) = self.date_range_selection.date_range();
+        // Lock state first to match writer thread lock order (state → db),
+        // preventing ABBA deadlock.
+        let project_names: Vec<String> = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.projects.keys().cloned().collect()
+        };
+
+        let (mut start, end) = self.date_range_selection.date_range();
+
         let db_lock = match self.db.lock() {
             Ok(db) => db,
             Err(_) => return,
         };
 
-        let daily_totals = db_lock.daily_totals(&start, &end).unwrap_or_default();
+        // For AllTime, use the actual earliest date from the database
+        if self.date_range_selection == DateRangeSelection::AllTime {
+            if let Ok(Some((min, _))) = db_lock.date_range() {
+                start = min;
+            }
+        }
 
-        // Get project names from current state
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let project_names: Vec<String> = state.projects.keys().cloned().collect();
-        drop(state);
+        let daily_totals = db_lock.daily_totals(&start, &end).unwrap_or_default();
 
         let mut project_trends = std::collections::HashMap::new();
         for proj in &project_names {
@@ -310,10 +328,10 @@ impl UsageApp {
 
 impl eframe::App for UsageApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Request repaint every 2 seconds to reflect watcher updates
-        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        ctx.request_repaint_after(std::time::Duration::from_secs(heuristics::REPAINT_INTERVAL_SECS));
 
         // Handle tray signals
+        #[cfg(feature = "tray")]
         if let Some(ref tray) = self.tray_state {
             use std::sync::atomic::Ordering;
 
@@ -343,12 +361,16 @@ impl eframe::App for UsageApp {
             }
         }
 
-        // Persist detail tables and metric versions every 30 seconds
-        if self.last_detail_persist.elapsed() >= std::time::Duration::from_secs(30) {
+        // Persist detail tables and metric versions periodically
+        if self.last_detail_persist.elapsed() >= std::time::Duration::from_secs(heuristics::DETAIL_PERSIST_INTERVAL_SECS) {
             let today = storage::today_str();
             if let Ok(db_lock) = self.db.lock() {
-                let _ = db_lock.persist_details(&today, &self.cached_state);
-                let _ = db_lock.persist_metric_versions(&today);
+                if let Err(e) = db_lock.persist_details(&today, &self.cached_state) {
+                    eprintln!("DB persist_details error: {}", e);
+                }
+                if let Err(e) = db_lock.persist_metric_versions(&today) {
+                    eprintln!("DB persist_metric_versions error: {}", e);
+                }
             }
             self.last_detail_persist = std::time::Instant::now();
         }
@@ -360,6 +382,7 @@ impl eframe::App for UsageApp {
         self.alert_state.check(cost, &self.settings);
 
         // Update tray title with summary
+        #[cfg(feature = "tray")]
         if let Some(ref tray) = self.tray_state {
             let sessions = state.sessions.len();
             let _ = tray

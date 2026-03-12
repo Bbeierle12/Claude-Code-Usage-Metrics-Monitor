@@ -95,8 +95,8 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
         Color32::from_rgb(200, 100, 100)
     };
     ui.horizontal(|ui| {
-        widgets::render_gauge(ui, "Confidence score", confidence, conf_color, 120.0);
-        if let Some(def) = metric_registry::lookup("confidence_score") {
+        widgets::render_gauge(ui, "Search-act signal", confidence, conf_color, 120.0);
+        if let Some(def) = metric_registry::lookup("search_act_signal") {
             widgets::metric_class_indicator(ui, def);
         }
     });

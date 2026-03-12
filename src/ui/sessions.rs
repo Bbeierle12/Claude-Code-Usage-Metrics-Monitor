@@ -1,5 +1,6 @@
 use chrono::Utc;
 use eframe::egui;
+use std::sync::mpsc;
 
 use crate::settings::Settings;
 use crate::types::{format_tokens, MetricsState};
@@ -11,6 +12,10 @@ pub struct SessionDetailState {
     pub expanded_session: Option<String>,
     pub timeline_events: Vec<timeline::TimelineEvent>,
     pub projects_dir: std::path::PathBuf,
+    /// Receiver for background timeline loading results.
+    timeline_rx: Option<mpsc::Receiver<Vec<timeline::TimelineEvent>>>,
+    /// True while waiting for background load to complete.
+    pub loading: bool,
 }
 
 impl SessionDetailState {
@@ -19,6 +24,8 @@ impl SessionDetailState {
             expanded_session: None,
             timeline_events: Vec::new(),
             projects_dir,
+            timeline_rx: None,
+            loading: false,
         }
     }
 
@@ -26,24 +33,43 @@ impl SessionDetailState {
         if self.expanded_session.as_deref() == Some(session_id) {
             self.expanded_session = None;
             self.timeline_events.clear();
+            self.timeline_rx = None;
+            self.loading = false;
         } else {
             self.expanded_session = Some(session_id.to_string());
-            self.timeline_events =
-                timeline::load_session_timeline(&self.projects_dir, session_id);
+            self.timeline_events.clear();
+            self.loading = true;
+
+            // Load timeline in a background thread to avoid blocking the UI.
+            let (tx, rx) = mpsc::channel();
+            let dir = self.projects_dir.clone();
+            let sid = session_id.to_string();
+            std::thread::spawn(move || {
+                let events = timeline::load_session_timeline(&dir, &sid);
+                let _ = tx.send(events);
+            });
+            self.timeline_rx = Some(rx);
+        }
+    }
+
+    /// Poll for background timeline results. Call once per frame.
+    pub fn poll(&mut self) {
+        if let Some(ref rx) = self.timeline_rx {
+            if let Ok(events) = rx.try_recv() {
+                self.timeline_events = events;
+                self.loading = false;
+                self.timeline_rx = None;
+            }
         }
     }
 }
 
 pub fn render(ui: &mut egui::Ui, state: &MetricsState, detail: &mut SessionDetailState, settings: &Settings) {
+    // Poll for background timeline load results
+    detail.poll();
+
     let sessions = state.sessions_sorted();
     let now = Utc::now();
-
-    // We also need session IDs, so collect from the main state
-    let session_ids: Vec<String> = {
-        let mut sorted: Vec<_> = state.sessions.iter().collect();
-        sorted.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_seen));
-        sorted.into_iter().map(|(id, _)| id.clone()).collect()
-    };
 
     if sessions.is_empty() {
         ui.colored_label(
@@ -74,8 +100,8 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, detail: &mut SessionDetai
                     ui.strong("Branch");
                     ui.end_row();
 
-                    for (i, s) in sessions.iter().enumerate() {
-                        let session_id = session_ids.get(i).map(|s| s.as_str()).unwrap_or("");
+                    for (session_id, s) in &sessions {
+                        let session_id: &str = session_id;
                         let is_active =
                             s.is_active(now, settings.active_session_threshold_minutes);
                         let is_expanded = detail.expanded_session.as_deref() == Some(session_id);
@@ -148,11 +174,17 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, detail: &mut SessionDetai
                         ui.end_row();
 
                         // Expanded timeline detail
-                        if is_expanded && !detail.timeline_events.is_empty() {
-                            // Span all 6 columns
+                        if is_expanded {
                             ui.label(""); // col 1 padding
                             ui.end_row();
-                            timeline::render(ui, &detail.timeline_events, session_id);
+                            if detail.loading {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(150, 150, 150),
+                                    "Loading timeline...",
+                                );
+                            } else if !detail.timeline_events.is_empty() {
+                                timeline::render(ui, &detail.timeline_events, session_id);
+                            }
                             ui.end_row();
                         }
                     }

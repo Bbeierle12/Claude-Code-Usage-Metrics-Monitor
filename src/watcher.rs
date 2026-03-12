@@ -8,15 +8,18 @@ use std::sync::mpsc;
 use crate::parser;
 use crate::types::MessageRecord;
 
-/// Tracks byte offsets for incremental reads.
+/// Tracks byte offsets and modification times for incremental reads.
 pub struct FileTracker {
     offsets: HashMap<PathBuf, u64>,
+    /// File modification time at last read, for detecting rewrites.
+    mod_times: HashMap<PathBuf, std::time::SystemTime>,
 }
 
 impl FileTracker {
     pub fn new() -> Self {
         Self {
             offsets: HashMap::new(),
+            mod_times: HashMap::new(),
         }
     }
 
@@ -27,19 +30,30 @@ impl FileTracker {
 
         let file = match File::open(path) {
             Ok(f) => f,
-            Err(_) => return records,
+            Err(e) => {
+                eprintln!("Watcher: failed to open {}: {}", path.display(), e);
+                return records;
+            }
         };
 
         let metadata = match file.metadata() {
             Ok(m) => m,
-            Err(_) => return records,
+            Err(e) => {
+                eprintln!("Watcher: failed to read metadata {}: {}", path.display(), e);
+                return records;
+            }
         };
 
         let file_len = metadata.len();
         let offset = self.offsets.get(path).copied().unwrap_or(0);
+        let prev_mod = self.mod_times.get(path).copied();
+        let cur_mod = metadata.modified().ok();
 
-        // File was truncated or replaced — re-read from beginning
-        let seek_pos = if offset > file_len { 0 } else { offset };
+        // File was truncated, or replaced with same/larger size (detected via mod time change
+        // when offset matches or exceeds file length). Re-read from beginning.
+        let was_rewritten = offset > file_len
+            || (offset > 0 && offset == file_len && cur_mod != prev_mod && prev_mod.is_some());
+        let seek_pos = if was_rewritten { 0 } else { offset };
 
         let mut reader = BufReader::new(file);
         if reader.seek(SeekFrom::Start(seek_pos)).is_err() {
@@ -54,8 +68,15 @@ impl FileTracker {
             match reader.read_line(&mut line) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
+                    // Only advance past complete (newline-terminated) lines.
+                    // An incomplete trailing line (no newline) may be a partial
+                    // write in progress — leave the offset so we re-read it
+                    // once the writer finishes.
+                    if !line.ends_with('\n') {
+                        break;
+                    }
                     current_pos += n as u64;
-                    if let Some(rec) = parser::parse_line(&line) {
+                    if let Ok(rec) = parser::parse_line(&line) {
                         records.push(rec);
                     }
                 }
@@ -64,6 +85,9 @@ impl FileTracker {
         }
 
         self.offsets.insert(path.to_path_buf(), current_pos);
+        if let Some(mt) = cur_mod {
+            self.mod_times.insert(path.to_path_buf(), mt);
+        }
         records
     }
 

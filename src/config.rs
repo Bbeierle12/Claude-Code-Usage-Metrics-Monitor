@@ -1,9 +1,10 @@
-// NOTE: Tunable values (thresholds, pricing, window size) have moved to
-// `settings::Settings` which persists to ~/.config/claude-usage-card/settings.json.
-// Only path constants remain here.
+/// Path constants for Claude Code data and application storage.
 
 /// Subdirectory under home where Claude Code stores projects.
 pub const CLAUDE_PROJECTS_REL: &str = ".claude/projects";
 
-/// Relative path under home for the SQLite database.
-pub const DB_REL_PATH: &str = ".config/claude-usage-card/usage.db";
+/// Application name used for config/data directory resolution.
+pub const APP_DIR_NAME: &str = "claude-usage-card";
+
+/// Database filename within the app data directory.
+pub const DB_FILENAME: &str = "usage.db";

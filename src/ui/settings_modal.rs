@@ -224,7 +224,7 @@ impl SettingsModal {
             ));
             ui.label(format!(
                 "Database: {}",
-                home.join(crate::config::DB_REL_PATH).display()
+                crate::storage::db_path().display()
             ));
             ui.label(format!("Settings: {}", Settings::path().display()));
             ui.add_space(8.0);

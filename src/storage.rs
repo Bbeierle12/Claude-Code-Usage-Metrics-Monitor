@@ -192,139 +192,146 @@ impl Storage {
     /// Upsert a batch of records into daily_metrics (grouped by date+project+model).
     pub fn upsert_daily(&self, records: &[MessageRecord]) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO daily_metrics (date, project, model, input_tokens, output_tokens,
-                 cache_creation_tokens, cache_read_tokens, message_count, session_count, tool_counts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
-                 ON CONFLICT(date, project, model) DO UPDATE SET
-                   input_tokens = input_tokens + excluded.input_tokens,
-                   output_tokens = output_tokens + excluded.output_tokens,
-                   cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
-                   cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                   message_count = message_count + excluded.message_count",
-            )?;
-
-            for rec in records {
-                let date = rec.timestamp.format("%Y-%m-%d").to_string();
-                let project = parser::short_project_name(&rec.cwd);
-                let tool_json = if rec.tool_names.is_empty() {
-                    "{}".to_string()
-                } else {
-                    let map: std::collections::HashMap<&str, u32> = rec
-                        .tool_names
-                        .iter()
-                        .fold(std::collections::HashMap::new(), |mut m, t| {
-                            *m.entry(t.as_str()).or_insert(0) += 1;
-                            m
-                        });
-                    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
-                };
-
-                stmt.execute(params![
-                    date,
-                    project,
-                    &rec.model,
-                    rec.input_tokens,
-                    rec.output_tokens,
-                    rec.cache_creation_tokens,
-                    rec.cache_read_tokens,
-                    1u64, // message_count increment
-                    tool_json,
-                ])?;
-            }
-        }
+        Self::upsert_daily_tx(&tx, records)?;
         tx.commit()
+    }
+
+    /// Upsert daily_metrics within an existing transaction.
+    fn upsert_daily_tx(
+        tx: &rusqlite::Transaction<'_>,
+        records: &[MessageRecord],
+    ) -> rusqlite::Result<()> {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO daily_metrics (date, project, model, input_tokens, output_tokens,
+             cache_creation_tokens, cache_read_tokens, message_count, session_count, tool_counts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
+             ON CONFLICT(date, project, model) DO UPDATE SET
+               input_tokens = input_tokens + excluded.input_tokens,
+               output_tokens = output_tokens + excluded.output_tokens,
+               cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+               cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+               message_count = message_count + excluded.message_count",
+        )?;
+
+        for rec in records {
+            let date = rec.timestamp.format("%Y-%m-%d").to_string();
+            let project = parser::short_project_name(&rec.cwd);
+            let tool_json = Self::build_tool_json(&rec.tool_names);
+
+            stmt.execute(params![
+                date,
+                project,
+                &rec.model,
+                rec.input_tokens,
+                rec.output_tokens,
+                rec.cache_creation_tokens,
+                rec.cache_read_tokens,
+                1u64, // message_count increment
+                tool_json,
+            ])?;
+        }
+        Ok(())
     }
 
     /// Upsert session-level rows from a batch of records.
     pub fn upsert_sessions(&self, records: &[MessageRecord]) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO sessions (session_id, date, project, model, branch,
-                 first_seen, last_seen, input_tokens, output_tokens,
-                 cache_creation_tokens, cache_read_tokens, message_count, tool_counts,
-                 user_message_count, tool_result_count, tool_error_count,
-                 assistant_text_length, user_text_length, assistant_message_count,
-                 turn_count, idle_gap_count, total_idle_secs,
-                 assistant_word_count, user_word_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
-                 ON CONFLICT(session_id) DO UPDATE SET
-                   model = CASE WHEN excluded.model != 'unknown' AND excluded.model != ''
-                                THEN excluded.model ELSE sessions.model END,
-                   branch = CASE WHEN excluded.branch != '' THEN excluded.branch ELSE sessions.branch END,
-                   last_seen = MAX(sessions.last_seen, excluded.last_seen),
-                   input_tokens = sessions.input_tokens + excluded.input_tokens,
-                   output_tokens = sessions.output_tokens + excluded.output_tokens,
-                   cache_creation_tokens = sessions.cache_creation_tokens + excluded.cache_creation_tokens,
-                   cache_read_tokens = sessions.cache_read_tokens + excluded.cache_read_tokens,
-                   message_count = sessions.message_count + excluded.message_count,
-                   user_message_count = sessions.user_message_count + excluded.user_message_count,
-                   tool_result_count = sessions.tool_result_count + excluded.tool_result_count,
-                   tool_error_count = sessions.tool_error_count + excluded.tool_error_count,
-                   assistant_text_length = sessions.assistant_text_length + excluded.assistant_text_length,
-                   user_text_length = sessions.user_text_length + excluded.user_text_length,
-                   assistant_message_count = sessions.assistant_message_count + excluded.assistant_message_count,
-                   turn_count = sessions.turn_count + excluded.turn_count,
-                   idle_gap_count = sessions.idle_gap_count + excluded.idle_gap_count,
-                   total_idle_secs = sessions.total_idle_secs + excluded.total_idle_secs,
-                   assistant_word_count = sessions.assistant_word_count + excluded.assistant_word_count,
-                   user_word_count = sessions.user_word_count + excluded.user_word_count",
-            )?;
-
-            for rec in records {
-                let date = rec.timestamp.format("%Y-%m-%d").to_string();
-                let project = parser::short_project_name(&rec.cwd);
-                let ts_str = rec.timestamp.to_rfc3339();
-                let tool_json = if rec.tool_names.is_empty() {
-                    "{}".to_string()
-                } else {
-                    let map: std::collections::HashMap<&str, u32> = rec
-                        .tool_names
-                        .iter()
-                        .fold(std::collections::HashMap::new(), |mut m, t| {
-                            *m.entry(t.as_str()).or_insert(0) += 1;
-                            m
-                        });
-                    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
-                };
-
-                let is_user = rec.message_type == MessageType::UserPrompt;
-                let is_tool = rec.message_type == MessageType::ToolResult;
-                let is_assistant = rec.message_type == MessageType::Assistant;
-                let is_error = rec.is_tool_error == Some(true);
-
-                stmt.execute(params![
-                    &rec.session_id,
-                    date,
-                    project,
-                    &rec.model,
-                    &rec.git_branch,
-                    &ts_str,
-                    &ts_str,
-                    rec.input_tokens,
-                    rec.output_tokens,
-                    rec.cache_creation_tokens,
-                    rec.cache_read_tokens,
-                    1u64,
-                    tool_json,
-                    if is_user { 1u64 } else { 0 },
-                    if is_tool { 1u64 } else { 0 },
-                    if is_tool && is_error { 1u64 } else { 0 },
-                    if is_assistant { rec.text_length } else { 0 },
-                    if is_user { rec.text_length } else { 0 },
-                    if is_assistant { 1u64 } else { 0 },
-                    if is_user { 1u64 } else { 0 }, // turn_count
-                    0u64, // idle_gap_count (computed at ingest time, not per-record)
-                    0i64, // total_idle_secs
-                    if is_assistant { rec.text_word_count } else { 0 },
-                    if is_user { rec.text_word_count } else { 0 },
-                ])?;
-            }
-        }
+        Self::upsert_sessions_tx(&tx, records)?;
         tx.commit()
+    }
+
+    /// Upsert sessions within an existing transaction.
+    fn upsert_sessions_tx(
+        tx: &rusqlite::Transaction<'_>,
+        records: &[MessageRecord],
+    ) -> rusqlite::Result<()> {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO sessions (session_id, date, project, model, branch,
+             first_seen, last_seen, input_tokens, output_tokens,
+             cache_creation_tokens, cache_read_tokens, message_count, tool_counts,
+             user_message_count, tool_result_count, tool_error_count,
+             assistant_text_length, user_text_length, assistant_message_count,
+             turn_count, idle_gap_count, total_idle_secs,
+             assistant_word_count, user_word_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+             ON CONFLICT(session_id) DO UPDATE SET
+               model = CASE WHEN excluded.model != 'unknown' AND excluded.model != ''
+                            THEN excluded.model ELSE sessions.model END,
+               branch = CASE WHEN excluded.branch != '' THEN excluded.branch ELSE sessions.branch END,
+               last_seen = MAX(sessions.last_seen, excluded.last_seen),
+               input_tokens = sessions.input_tokens + excluded.input_tokens,
+               output_tokens = sessions.output_tokens + excluded.output_tokens,
+               cache_creation_tokens = sessions.cache_creation_tokens + excluded.cache_creation_tokens,
+               cache_read_tokens = sessions.cache_read_tokens + excluded.cache_read_tokens,
+               message_count = sessions.message_count + excluded.message_count,
+               user_message_count = sessions.user_message_count + excluded.user_message_count,
+               tool_result_count = sessions.tool_result_count + excluded.tool_result_count,
+               tool_error_count = sessions.tool_error_count + excluded.tool_error_count,
+               assistant_text_length = sessions.assistant_text_length + excluded.assistant_text_length,
+               user_text_length = sessions.user_text_length + excluded.user_text_length,
+               assistant_message_count = sessions.assistant_message_count + excluded.assistant_message_count,
+               turn_count = sessions.turn_count + excluded.turn_count,
+               idle_gap_count = sessions.idle_gap_count + excluded.idle_gap_count,
+               total_idle_secs = sessions.total_idle_secs + excluded.total_idle_secs,
+               assistant_word_count = sessions.assistant_word_count + excluded.assistant_word_count,
+               user_word_count = sessions.user_word_count + excluded.user_word_count",
+        )?;
+
+        for rec in records {
+            let date = rec.timestamp.format("%Y-%m-%d").to_string();
+            let project = parser::short_project_name(&rec.cwd);
+            let ts_str = rec.timestamp.to_rfc3339();
+            let tool_json = Self::build_tool_json(&rec.tool_names);
+
+            let is_user = rec.message_type == MessageType::UserPrompt;
+            let is_tool = rec.message_type == MessageType::ToolResult;
+            let is_assistant = rec.message_type == MessageType::Assistant;
+            let is_error = rec.is_tool_error == Some(true);
+
+            stmt.execute(params![
+                &rec.session_id,
+                date,
+                project,
+                &rec.model,
+                &rec.git_branch,
+                &ts_str,
+                &ts_str,
+                rec.input_tokens,
+                rec.output_tokens,
+                rec.cache_creation_tokens,
+                rec.cache_read_tokens,
+                1u64,
+                tool_json,
+                if is_user { 1u64 } else { 0 },
+                if is_tool { 1u64 } else { 0 },
+                if is_tool && is_error { 1u64 } else { 0 },
+                if is_assistant { rec.text_length } else { 0 },
+                if is_user { rec.text_length } else { 0 },
+                if is_assistant { 1u64 } else { 0 },
+                if is_user { 1u64 } else { 0 }, // turn_count
+                0u64, // idle_gap_count (computed at ingest time, not per-record)
+                0i64, // total_idle_secs
+                if is_assistant { rec.text_word_count } else { 0 },
+                if is_user { rec.text_word_count } else { 0 },
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// Build a JSON string of tool name counts, used by both upsert methods.
+    fn build_tool_json(tool_names: &[String]) -> String {
+        if tool_names.is_empty() {
+            "{}".to_string()
+        } else {
+            let map: std::collections::HashMap<&str, u32> = tool_names
+                .iter()
+                .fold(std::collections::HashMap::new(), |mut m, t| {
+                    *m.entry(t.as_str()).or_insert(0) += 1;
+                    m
+                });
+            serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+        }
     }
 
     /// Persist records: upsert both daily_metrics and sessions.
@@ -336,6 +343,8 @@ impl Storage {
 
     /// Clear all data for the given dates, then insert fresh records.
     /// This avoids double-counting when the same JSONL data is re-read on restart.
+    /// Delete + insert are wrapped in a single transaction to prevent data loss
+    /// if the process crashes mid-rebuild.
     pub fn rebuild_from_records(&self, records: &[MessageRecord]) -> rusqlite::Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -355,11 +364,11 @@ impl Storage {
             tx.execute("DELETE FROM sessions WHERE date = ?1", params![date])?;
         }
 
-        tx.commit()?;
+        // Insert fresh within the same transaction (additive upsert is safe since we cleared first)
+        Self::upsert_daily_tx(&tx, records)?;
+        Self::upsert_sessions_tx(&tx, records)?;
 
-        // Now insert fresh (additive upsert is safe since we cleared first)
-        self.upsert_daily(records)?;
-        self.upsert_sessions(records)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -763,11 +772,13 @@ impl Storage {
     }
 }
 
-/// Default database path.
+/// Default database path (platform-correct data directory).
 pub fn db_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(config::DB_REL_PATH)
+    dirs::data_local_dir()
+        .or_else(|| dirs::config_dir())
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config"))
+        .join(config::APP_DIR_NAME)
+        .join(config::DB_FILENAME)
 }
 
 /// Compute a date string N days ago.
@@ -1064,7 +1075,7 @@ mod tests {
         assert_eq!(versions.len(), inferred_count);
 
         // Check a specific one
-        let confidence = versions.iter().find(|(id, _, _)| id == "confidence_score");
+        let confidence = versions.iter().find(|(id, _, _)| id == "search_act_signal");
         assert!(confidence.is_some());
         let (_, ver, desc) = confidence.unwrap();
         assert_eq!(*ver, 1);

@@ -172,11 +172,11 @@ pub const METRICS: &[MetricDef] = &[
         description: "search_ops / (search_ops + action_ops); thresholds >0.4/0.2",
     },
     MetricDef {
-        id: "confidence_score",
-        display_name: "Confidence Score",
+        id: "search_act_signal",
+        display_name: "Search-Act Signal",
         class: MetricClass::Inferred,
         version: 1,
-        description: "min(search_act_ratio * 1.5, 1.0)",
+        description: "Experimental heuristic: min(search_act_ratio * 1.5, 1.0)",
     },
     MetricDef {
         id: "session_phase",
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn test_lookup() {
         assert!(lookup("input_tokens").is_some());
-        assert!(lookup("confidence_score").is_some());
+        assert!(lookup("search_act_signal").is_some());
         assert!(lookup("nonexistent").is_none());
     }
 

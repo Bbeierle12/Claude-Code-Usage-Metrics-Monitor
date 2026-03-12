@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 
 use chrono::{Duration, Timelike, Utc};
 
+use crate::heuristics;
 use crate::parser;
 use crate::settings::Settings;
 use crate::types::{
@@ -91,7 +92,7 @@ fn compute_tree_depth(parent_to_children: &std::collections::HashMap<String, Vec
     let mut stack: Vec<(&str, u32)> = roots.iter().map(|r| (r.as_str(), 1u32)).collect();
 
     while let Some((node, depth)) = stack.pop() {
-        if depth > 50 {
+        if depth > heuristics::TREE_DEPTH_LIMIT {
             return 50;
         }
         max_depth = max_depth.max(depth);
@@ -141,7 +142,9 @@ impl MetricsState {
             self.dirty = true;
             self.total_messages += 1;
 
-            // Update last_updated
+            // Save previous last_updated for idle-gap computation,
+            // then update to current timestamp.
+            let prev_last_updated = self.last_updated;
             match self.last_updated {
                 Some(prev) if rec.timestamp > prev => self.last_updated = Some(rec.timestamp),
                 None => self.last_updated = Some(rec.timestamp),
@@ -163,15 +166,16 @@ impl MetricsState {
             }
 
             // ── Idle gap bucketing (all record types) ──
-            if let Some(last_ts) = self.last_updated {
+            // Use the saved previous timestamp, not the just-updated one.
+            if let Some(last_ts) = prev_last_updated {
                 if last_ts < rec.timestamp {
                     let gap_secs = (rec.timestamp - last_ts).num_seconds();
                     if gap_secs > 0 {
-                        if gap_secs < 30 {
+                        if gap_secs < heuristics::IDLE_GAP_RAPID_SECS {
                             self.temporal.idle_gap_buckets.rapid += 1;
-                        } else if gap_secs < 120 {
+                        } else if gap_secs < heuristics::IDLE_GAP_NORMAL_SECS {
                             self.temporal.idle_gap_buckets.normal += 1;
-                        } else if gap_secs < 600 {
+                        } else if gap_secs < heuristics::IDLE_GAP_THINKING_SECS {
                             self.temporal.idle_gap_buckets.thinking += 1;
                         } else {
                             self.temporal.idle_gap_buckets.away += 1;
@@ -179,7 +183,7 @@ impl MetricsState {
                     }
 
                     // ── Burst detection ──
-                    if gap_secs < 5 {
+                    if gap_secs < heuristics::BURST_GAP_SECS {
                         if let Some(last_burst) = self.temporal.bursts.last_mut() {
                             last_burst.end = rec.timestamp;
                             last_burst.message_count += 1;
@@ -192,7 +196,7 @@ impl MetricsState {
                                 tool_count: rec.tool_names.len() as u64,
                             });
                         }
-                    } else if gap_secs >= 5 && !self.temporal.bursts.is_empty() {
+                    } else if gap_secs >= heuristics::BURST_GAP_SECS && !self.temporal.bursts.is_empty() {
                         // End current burst if gap too long
                         let last = self.temporal.bursts.last().unwrap();
                         if last.end == last_ts {
@@ -206,29 +210,11 @@ impl MetricsState {
             let session = self
                 .sessions
                 .entry(rec.session_id.clone())
-                .or_insert_with(|| SessionMetrics {
-                    project: parser::short_project_name(&rec.cwd),
-                    model: rec.model.clone(),
-                    first_seen: rec.timestamp,
-                    last_seen: rec.timestamp,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
-                    message_count: 0,
-                    branch: String::new(),
-                    user_message_count: 0,
-                    tool_result_count: 0,
-                    tool_error_count: 0,
-                    assistant_text_length: 0,
-                    user_text_length: 0,
-                    assistant_message_count: 0,
-                    turn_count: 0,
-                    idle_gap_count: 0,
-                    total_idle_secs: 0,
-                    assistant_word_count: 0,
-                    user_word_count: 0,
-                });
+                .or_insert_with(|| SessionMetrics::new(
+                    parser::short_project_name(&rec.cwd),
+                    rec.model.clone(),
+                    rec.timestamp,
+                ));
 
             // Idle gap detection: compare with previous last_seen BEFORE updating
             if session.message_count > 0 && idle_gap_minutes > 0 {
@@ -450,25 +436,25 @@ impl MetricsState {
                             self.todo_intel.total_edit_write_bash += 1;
                         }
 
-                        // Retry detection: same tool+file within 120s
+                        // Retry detection: same tool+file within window
                         for (fp, tool) in &details.file_paths {
                             let key = (tool.clone(), fp.clone(), rec.timestamp);
                             let is_retry = behavior.recent_tool_calls.iter().any(|(t, f, ts)| {
                                 t == tool
                                     && f == fp
-                                    && (rec.timestamp - *ts).num_seconds() < 120
+                                    && (rec.timestamp - *ts).num_seconds() < heuristics::RETRY_WINDOW_SECS
                             });
                             if is_retry {
                                 behavior.retry_count += 1;
                             }
                             behavior.recent_tool_calls.push_back(key);
-                            if behavior.recent_tool_calls.len() > 20 {
+                            if behavior.recent_tool_calls.len() > heuristics::RECENT_TOOL_CALLS_CAP {
                                 behavior.recent_tool_calls.pop_front();
                             }
                         }
 
                         // TDD cycle detection (T-E-T)
-                        if behavior.tdd_sequence.len() > 20 {
+                        if behavior.tdd_sequence.len() > heuristics::TDD_SEQUENCE_CAP {
                             behavior.tdd_sequence.pop_front();
                         }
                         if behavior.tdd_sequence.len() >= 3 {
@@ -535,13 +521,13 @@ impl MetricsState {
                     if total_input > 0 {
                         let eff = rec.cache_read_tokens as f64 / total_input as f64;
                         self.cost_intel.cache_efficiency_samples.push_back((rec.timestamp, eff));
-                        if self.cost_intel.cache_efficiency_samples.len() > 200 {
+                        if self.cost_intel.cache_efficiency_samples.len() > heuristics::CACHE_EFFICIENCY_SAMPLE_CAP {
                             self.cost_intel.cache_efficiency_samples.pop_front();
                         }
                     }
 
                     // Token waste detection (high input, low output)
-                    if self.cost_intel.last_assistant_input > 0 && rec.output_tokens < 100 && rec.input_tokens > 50000 {
+                    if self.cost_intel.last_assistant_input > 0 && rec.output_tokens < heuristics::TOKEN_WASTE_OUTPUT_MAX && rec.input_tokens > heuristics::TOKEN_WASTE_INPUT_MIN {
                         self.cost_intel.token_waste_events += 1;
                         self.cost_intel.token_waste_tokens += rec.input_tokens;
                     }
@@ -576,13 +562,13 @@ impl MetricsState {
                         behavior.tool_sequences.push(seq);
                     }
 
-                    // Prompt length tracking (bounded to 100)
-                    if behavior.prompt_lengths.len() < 100 {
+                    // Prompt length tracking
+                    if behavior.prompt_lengths.len() < heuristics::PROMPT_LENGTHS_CAP {
                         behavior.prompt_lengths.push(rec.text_length);
                     }
 
                     // Question vs directive heuristic
-                    if rec.text_length < 80 {
+                    if rec.text_length < heuristics::PROMPT_DIRECTIVE_THRESHOLD {
                         behavior.directive_count += 1;
                     } else {
                         behavior.question_count += 1;
@@ -704,10 +690,10 @@ impl MetricsState {
             .count()
     }
 
-    /// Sessions sorted by last_seen descending.
-    pub fn sessions_sorted(&self) -> Vec<&SessionMetrics> {
-        let mut sessions: Vec<_> = self.sessions.values().collect();
-        sessions.sort_by_key(|s| Reverse(s.last_seen));
+    /// Sessions sorted by last_seen descending, with their IDs.
+    pub fn sessions_sorted(&self) -> Vec<(&String, &SessionMetrics)> {
+        let mut sessions: Vec<_> = self.sessions.iter().collect();
+        sessions.sort_by_key(|(_, s)| Reverse(s.last_seen));
         sessions
     }
 
@@ -1048,9 +1034,9 @@ mod tests {
         let sorted = state.sessions_sorted();
         assert_eq!(sorted.len(), 3);
         // Most recent first
-        assert_eq!(sorted[0].input_tokens, 30); // newest
-        assert_eq!(sorted[1].input_tokens, 20); // middle
-        assert_eq!(sorted[2].input_tokens, 10); // oldest
+        assert_eq!(sorted[0].1.input_tokens, 30); // newest
+        assert_eq!(sorted[1].1.input_tokens, 20); // middle
+        assert_eq!(sorted[2].1.input_tokens, 10); // oldest
     }
 
     #[test]

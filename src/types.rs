@@ -110,6 +110,34 @@ pub struct SessionMetrics {
 }
 
 impl SessionMetrics {
+    /// Create a new SessionMetrics with the given project, model, and timestamp.
+    /// All counters default to zero.
+    pub fn new(project: String, model: String, timestamp: DateTime<Utc>) -> Self {
+        Self {
+            project,
+            model,
+            first_seen: timestamp,
+            last_seen: timestamp,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            message_count: 0,
+            branch: String::new(),
+            user_message_count: 0,
+            tool_result_count: 0,
+            tool_error_count: 0,
+            assistant_text_length: 0,
+            user_text_length: 0,
+            assistant_message_count: 0,
+            turn_count: 0,
+            idle_gap_count: 0,
+            total_idle_secs: 0,
+            assistant_word_count: 0,
+            user_word_count: 0,
+        }
+    }
+
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_creation_tokens + self.cache_read_tokens
     }
@@ -337,7 +365,6 @@ pub struct SessionBehavior {
     pub parent_to_children: HashMap<String, Vec<String>>,
     pub max_tree_depth: u32,
     pub branch_count: u32,
-    pub compaction_count: u64,
     pub prompt_lengths: Vec<u64>,
     pub question_count: u64,
     pub directive_count: u64,

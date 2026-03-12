@@ -16,7 +16,6 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     // Aggregated metrics
     let mut max_depth: u32 = 0;
     let mut total_branches: u32 = 0;
-    let mut total_compactions: u64 = 0;
     let mut total_prompts: u64 = 0;
     let mut total_prompt_len: u64 = 0;
     let mut total_questions: u64 = 0;
@@ -25,7 +24,6 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
     for behavior in state.session_behaviors.values() {
         max_depth = max_depth.max(behavior.max_tree_depth);
         total_branches += behavior.branch_count;
-        total_compactions += behavior.compaction_count;
         total_questions += behavior.question_count;
         total_directives += behavior.directive_count;
         for &len in &behavior.prompt_lengths {
@@ -56,14 +54,6 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState) {
         ui,
         "Conversation forks",
         &total_branches.to_string(),
-        Color32::from_rgb(180, 180, 180),
-    );
-
-    // Compaction frequency
-    widgets::render_metric_row(
-        ui,
-        "Compactions",
-        &total_compactions.to_string(),
         Color32::from_rgb(180, 180, 180),
     );
 

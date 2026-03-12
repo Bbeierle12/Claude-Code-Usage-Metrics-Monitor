@@ -25,6 +25,22 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Show last-updated age
+            if let Some(last) = state.last_updated {
+                let ago_secs = (now - last).num_seconds();
+                let ago_label = if ago_secs < 60 {
+                    format!("{}s ago", ago_secs)
+                } else if ago_secs < 3600 {
+                    format!("{}m ago", ago_secs / 60)
+                } else {
+                    format!("{}h ago", ago_secs / 3600)
+                };
+                ui.colored_label(
+                    egui::Color32::from_rgb(120, 120, 120),
+                    format!("Updated {}", ago_label),
+                );
+                ui.label(" | ");
+            }
             ui.label(now.format("%Y-%m-%d").to_string());
         });
     });
@@ -50,7 +66,7 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
             ));
         });
         cols[3].vertical_centered(|ui| {
-            ui.strong("Est. Cost");
+            ui.strong("API-Equiv Cost");
             let cost = state.estimated_cost(settings);
             ui.colored_label(alerts::cost_color(cost, settings), format!("${:.2}", cost));
         });
@@ -198,11 +214,8 @@ pub fn render(ui: &mut egui::Ui, state: &MetricsState, settings: &Settings) {
 
 /// Extract a short display name from a full model identifier.
 /// "claude-opus-4-6" → "opus-4-6", "claude-sonnet-4-5" → "sonnet-4-5"
-fn friendly_display_name(model: &str) -> String {
-    model
-        .strip_prefix("claude-")
-        .unwrap_or(model)
-        .to_string()
+fn friendly_display_name(model: &str) -> &str {
+    model.strip_prefix("claude-").unwrap_or(model)
 }
 
 fn model_color(name: &str) -> egui::Color32 {

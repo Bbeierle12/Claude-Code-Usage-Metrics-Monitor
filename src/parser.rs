@@ -1,37 +1,62 @@
+use crate::heuristics;
 use crate::types::{MessageRecord, MessageType, SubagentSpawn, ToolInputDetails, ToolOutputDetails};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+/// Reasons a JSONL line may be skipped during parsing.
+#[derive(Debug)]
+pub enum ParseSkip {
+    /// Empty or whitespace-only line.
+    EmptyLine,
+    /// Invalid JSON syntax.
+    InvalidJson,
+    /// Line type is not "assistant" or "user".
+    UnknownType(String),
+    /// Required field(s) missing or malformed.
+    MissingField,
+    /// Streaming intermediate line (no stop_reason).
+    StreamingIntermediate,
+}
+
 /// Try to parse a single JSONL line into a MessageRecord.
 /// Accepts `type: "assistant"` (with usage data), `type: "user"` (human prompt),
 /// and `type: "user"` with `toolUseResult` (tool result).
-/// Returns None for other types, malformed lines, or lines missing required fields.
-pub fn parse_line(line: &str) -> Option<MessageRecord> {
+/// Returns `Err(ParseSkip)` with the reason for skipped lines.
+pub fn parse_line(line: &str) -> Result<MessageRecord, ParseSkip> {
     let line = line.trim();
     if line.is_empty() {
-        return None;
+        return Err(ParseSkip::EmptyLine);
     }
 
-    let v: Value = serde_json::from_str(line).ok()?;
+    let v: Value = serde_json::from_str(line).map_err(|_| ParseSkip::InvalidJson)?;
 
-    let line_type = v.get("type")?.as_str()?;
+    let line_type = v.get("type")
+        .and_then(|t| t.as_str())
+        .ok_or(ParseSkip::MissingField)?;
 
     match line_type {
         "assistant" => parse_assistant(&v),
         "user" => parse_user(&v),
-        _ => None,
+        other => Err(ParseSkip::UnknownType(other.to_string())),
     }
 }
 
 /// Parse an assistant line (has usage data, model, tool_use blocks, text blocks).
-fn parse_assistant(v: &Value) -> Option<MessageRecord> {
-    let session_id = v.get("sessionId")?.as_str()?.to_string();
+fn parse_assistant(v: &Value) -> Result<MessageRecord, ParseSkip> {
+    let session_id = v.get("sessionId")
+        .and_then(|s| s.as_str())
+        .ok_or(ParseSkip::MissingField)?
+        .to_string();
     let cwd = v
         .get("cwd")
         .and_then(|c| c.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let timestamp: DateTime<Utc> = v.get("timestamp")?.as_str()?.parse().ok()?;
+    let timestamp: DateTime<Utc> = v.get("timestamp")
+        .and_then(|t| t.as_str())
+        .ok_or(ParseSkip::MissingField)?
+        .parse()
+        .map_err(|_| ParseSkip::MissingField)?;
     let git_branch = v
         .get("gitBranch")
         .and_then(|b| b.as_str())
@@ -48,7 +73,7 @@ fn parse_assistant(v: &Value) -> Option<MessageRecord> {
         .unwrap_or("")
         .to_string();
 
-    let message = v.get("message")?;
+    let message = v.get("message").ok_or(ParseSkip::MissingField)?;
 
     // Claude Code logs each streaming content block (thinking, text, tool_use) as a
     // separate assistant JSONL line. All lines from the same API turn carry identical
@@ -58,7 +83,7 @@ fn parse_assistant(v: &Value) -> Option<MessageRecord> {
     let stop_reason = message.get("stop_reason");
     match stop_reason {
         Some(sr) if !sr.is_null() => {} // final line — process it
-        _ => return None,               // streaming intermediate or missing — skip
+        _ => return Err(ParseSkip::StreamingIntermediate),
     }
 
     let model = message
@@ -95,7 +120,7 @@ fn parse_assistant(v: &Value) -> Option<MessageRecord> {
                 }
                 Some("text") => {
                     if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
-                        text_length += txt.len() as u64;
+                        text_length += txt.chars().count() as u64;
                         text_word_count += txt.split_whitespace().count() as u64;
                     }
                 }
@@ -104,7 +129,7 @@ fn parse_assistant(v: &Value) -> Option<MessageRecord> {
         }
     }
 
-    let usage = message.get("usage")?;
+    let usage = message.get("usage").ok_or(ParseSkip::MissingField)?;
 
     let input_tokens = usage
         .get("input_tokens")
@@ -123,7 +148,7 @@ fn parse_assistant(v: &Value) -> Option<MessageRecord> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    Some(MessageRecord {
+    Ok(MessageRecord {
         session_id,
         timestamp,
         cwd,
@@ -239,14 +264,21 @@ fn extract_tool_input(tool_name: &str, input: &Value, details: &mut ToolInputDet
 }
 
 /// Parse a user line — either a human prompt or a tool result.
-fn parse_user(v: &Value) -> Option<MessageRecord> {
-    let session_id = v.get("sessionId")?.as_str()?.to_string();
+fn parse_user(v: &Value) -> Result<MessageRecord, ParseSkip> {
+    let session_id = v.get("sessionId")
+        .and_then(|s| s.as_str())
+        .ok_or(ParseSkip::MissingField)?
+        .to_string();
     let cwd = v
         .get("cwd")
         .and_then(|c| c.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let timestamp: DateTime<Utc> = v.get("timestamp")?.as_str()?.parse().ok()?;
+    let timestamp: DateTime<Utc> = v.get("timestamp")
+        .and_then(|t| t.as_str())
+        .ok_or(ParseSkip::MissingField)?
+        .parse()
+        .map_err(|_| ParseSkip::MissingField)?;
     let git_branch = v
         .get("gitBranch")
         .and_then(|b| b.as_str())
@@ -281,13 +313,13 @@ fn parse_user_prompt(
     git_branch: String,
     uuid: String,
     parent_uuid: String,
-) -> Option<MessageRecord> {
-    let message = v.get("message")?;
-    let content = message.get("content")?;
+) -> Result<MessageRecord, ParseSkip> {
+    let message = v.get("message").ok_or(ParseSkip::MissingField)?;
+    let content = message.get("content").ok_or(ParseSkip::MissingField)?;
 
     let (text_length, text_word_count) = extract_text_stats(content);
 
-    Some(MessageRecord {
+    Ok(MessageRecord {
         session_id,
         timestamp,
         cwd,
@@ -319,9 +351,9 @@ fn parse_tool_result(
     git_branch: String,
     uuid: String,
     parent_uuid: String,
-) -> Option<MessageRecord> {
-    let message = v.get("message")?;
-    let content = message.get("content")?;
+) -> Result<MessageRecord, ParseSkip> {
+    let message = v.get("message").ok_or(ParseSkip::MissingField)?;
+    let content = message.get("content").ok_or(ParseSkip::MissingField)?;
 
     let mut tool_use_ids = Vec::new();
     let mut is_error = false;
@@ -351,7 +383,7 @@ fn parse_tool_result(
     // Extract tool output details from toolUseResult
     let tool_output_details = extract_tool_output(v.get("toolUseResult"));
 
-    Some(MessageRecord {
+    Ok(MessageRecord {
         session_id,
         timestamp,
         cwd,
@@ -382,8 +414,8 @@ fn extract_tool_output(tool_use_result: Option<&Value>) -> Option<ToolOutputDeta
 
     if let Some(stdout) = result.get("stdout").and_then(|s| s.as_str()) {
         if !stdout.is_empty() {
-            let truncated = if stdout.len() > 500 {
-                let mut end = 500;
+            let truncated = if stdout.len() > heuristics::STDOUT_TRUNCATION_LIMIT {
+                let mut end = heuristics::STDOUT_TRUNCATION_LIMIT;
                 while end > 0 && !stdout.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -438,7 +470,7 @@ fn extract_tool_output(tool_use_result: Option<&Value>) -> Option<ToolOutputDeta
 /// Returns (char_count, word_count).
 fn extract_text_stats(content: &Value) -> (u64, u64) {
     if let Some(s) = content.as_str() {
-        return (s.len() as u64, s.split_whitespace().count() as u64);
+        return (s.chars().count() as u64, s.split_whitespace().count() as u64);
     }
     if let Some(arr) = content.as_array() {
         let mut chars: u64 = 0;
@@ -446,7 +478,7 @@ fn extract_text_stats(content: &Value) -> (u64, u64) {
         for item in arr {
             if item.get("type").and_then(|t| t.as_str()) == Some("text") {
                 if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
-                    chars += txt.len() as u64;
+                    chars += txt.chars().count() as u64;
                     words += txt.split_whitespace().count() as u64;
                 }
             }
@@ -458,7 +490,7 @@ fn extract_text_stats(content: &Value) -> (u64, u64) {
 
 /// Parse all lines from a buffer, returning only valid MessageRecords.
 pub fn parse_buffer(buf: &str) -> Vec<MessageRecord> {
-    buf.lines().filter_map(parse_line).collect()
+    buf.lines().filter_map(|l| parse_line(l).ok()).collect()
 }
 
 /// Cached home directory path to avoid repeated OS calls.
@@ -472,7 +504,7 @@ fn cached_home_dir() -> &'static str {
     })
 }
 
-/// Extract a short project name from a cwd path.
+/// Extract a home-relative project path from a cwd path.
 /// "/home/bbeierle12/Agent-Shell" -> "Agent-Shell"
 /// "/home/bbeierle12" -> "~"
 pub fn short_project_name(cwd: &str) -> String {
@@ -508,7 +540,7 @@ mod tests {
     fn test_parse_line_non_assistant() {
         // "user" lines now parse — but a "progress" line should still return None
         let line = r#"{"type":"progress","sessionId":"abc","timestamp":"2026-03-03T00:00:00Z","cwd":"/tmp","data":{}}"#;
-        assert!(parse_line(line).is_none());
+        assert!(parse_line(line).is_err());
     }
 
     #[test]
@@ -528,35 +560,35 @@ mod tests {
 
     #[test]
     fn test_parse_line_empty_string() {
-        assert!(parse_line("").is_none());
+        assert!(parse_line("").is_err());
     }
 
     #[test]
     fn test_parse_line_whitespace_only() {
-        assert!(parse_line("   \n").is_none());
+        assert!(parse_line("   \n").is_err());
     }
 
     #[test]
     fn test_parse_line_invalid_json() {
-        assert!(parse_line("{not json}").is_none());
+        assert!(parse_line("{not json}").is_err());
     }
 
     #[test]
     fn test_parse_line_missing_usage() {
         let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[]}}"#;
-        assert!(parse_line(line).is_none());
+        assert!(parse_line(line).is_err());
     }
 
     #[test]
     fn test_parse_line_missing_session_id() {
         let line = r#"{"type":"assistant","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
-        assert!(parse_line(line).is_none());
+        assert!(parse_line(line).is_err());
     }
 
     #[test]
     fn test_parse_line_missing_timestamp() {
         let line = r#"{"type":"assistant","sessionId":"abc","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
-        assert!(parse_line(line).is_none());
+        assert!(parse_line(line).is_err());
     }
 
     #[test]
@@ -610,14 +642,14 @@ mod tests {
     fn test_parse_line_skips_streaming_intermediate() {
         // Assistant line without stop_reason (streaming intermediate) — should be skipped
         let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","content":[{"type":"text","text":"partial"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
-        assert!(parse_line(line).is_none());
+        assert!(parse_line(line).is_err());
     }
 
     #[test]
     fn test_parse_line_skips_null_stop_reason() {
         // Assistant line with stop_reason: null (streaming intermediate) — should be skipped
         let line = r#"{"type":"assistant","sessionId":"abc","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"model":"sonnet","role":"assistant","stop_reason":null,"content":[{"type":"text","text":"partial"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
-        assert!(parse_line(line).is_none());
+        assert!(parse_line(line).is_err());
     }
 
     #[test]
@@ -689,7 +721,7 @@ mod tests {
     #[test]
     fn test_parse_user_prompt_missing_session_id() {
         let line = r#"{"type":"user","timestamp":"2026-03-03T10:00:00Z","cwd":"/tmp","message":{"role":"user","content":"hi"}}"#;
-        assert!(parse_line(line).is_none());
+        assert!(parse_line(line).is_err());
     }
 
     // ── Tool result tests ──

@@ -33,7 +33,7 @@ impl PlanTier {
 
 impl Default for PlanTier {
     fn default() -> Self {
-        PlanTier::Max20x
+        PlanTier::Pro
     }
 }
 
@@ -126,22 +126,34 @@ impl Default for Settings {
             },
             plan_tier: PlanTier::default(),
             usage_window_hours: 5.0,
-            opus_output_limit: 2_000_000,
-            sonnet_output_limit: 8_000_000,
-            haiku_output_limit: 16_000_000,
+            opus_output_limit: 100_000,
+            sonnet_output_limit: 400_000,
+            haiku_output_limit: 800_000,
         }
     }
 }
 
 impl Settings {
     /// Returns (input_per_m, output_per_m, cache_write_per_m, cache_read_per_m) for a model.
+    /// Unknown models default to Sonnet pricing with a one-time stderr warning.
     pub fn cost_rates(&self, model: &str) -> (f64, f64, f64, f64) {
         let p = if model.contains("opus") {
             &self.opus_pricing
         } else if model.contains("haiku") {
             &self.haiku_pricing
+        } else if model.contains("sonnet") || model.is_empty() || model == "unknown" {
+            &self.sonnet_pricing
         } else {
-            &self.sonnet_pricing // default to sonnet-tier
+            // Unknown model — log once and fall back to Sonnet pricing
+            use std::sync::Mutex;
+            static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            if let Ok(mut warned) = WARNED.lock() {
+                if !warned.iter().any(|w| w == model) {
+                    eprintln!("Warning: unknown model '{}', using Sonnet pricing", model);
+                    warned.push(model.to_string());
+                }
+            }
+            &self.sonnet_pricing
         };
         (p.input_per_m, p.output_per_m, p.cache_write_per_m, p.cache_read_per_m)
     }
@@ -234,18 +246,29 @@ impl Settings {
         errors
     }
 
-    /// Path to the settings JSON file.
+    /// Path to the settings JSON file (platform-correct config directory).
     pub fn path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".config/claude-usage-card/settings.json")
+        dirs::config_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+            .join("claude-usage-card/settings.json")
     }
 
     /// Load settings from disk, falling back to defaults.
+    /// Logs a warning if the settings file exists but contains invalid JSON.
     pub fn load() -> Self {
         let path = Self::path();
         match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: invalid settings at {}, using defaults: {}",
+                        path.display(),
+                        e
+                    );
+                    Self::default()
+                }
+            },
             Err(_) => Self::default(),
         }
     }
